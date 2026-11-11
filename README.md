@@ -2,6 +2,30 @@
 
 依据产品/技术文档 v0.4，视觉基准为 `designs/aigc-studio-fresh`。项目处于开发与试用阶段。产品资料位于 `AIGC营销工作台_产品与技术文档_v0.4`，应用代码位于 `apps`。
 
+## 产品截图
+
+以下为现有前端在本地演示模式下的截图，使用预置示例商品与模拟状态；不代表真实模型生成效果或生产验收结果。
+
+### 视频预览与文案编辑
+
+![视频预览与文案编辑](apps/web/verification/chrome-populated/native/settled-capture/frontend-1440-video.png)
+
+### 营销海报
+
+![营销海报](apps/web/verification/chrome-populated/native/settled-capture/frontend-1440-poster.png)
+
+### 生成范围与费用确认
+
+![生成范围与费用确认](apps/web/verification/chrome-populated/native/settled-capture/frontend-1440-generate.png)
+
+### 人工复核与导出
+
+![人工复核与导出](apps/web/verification/chrome-populated/native/settled-capture/frontend-1440-review.png)
+
+### 作品管理
+
+![作品管理](apps/web/verification/chrome-populated/native/settled-capture/frontend-1440-works.png)
+
 ## 本地运行
 
 1. 安装 Python 依赖：`python -m pip install -r apps/api/requirements.txt -r apps/worker/requirements.txt`。
