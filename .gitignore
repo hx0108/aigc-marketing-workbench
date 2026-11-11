@@ -1,0 +1,31 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.db
+node_modules/
+dist/
+runtime/
+
+# 本地运行产物与部署验收材料
+output/
+**/verification/
+HANDOFF.md
+*.log
+*.pem
+*.key
+
+# Public repository excludes local operations and unreviewed media
+deploy/
+docs/
+!docs/CREATIVE_SKILLS.md
+scripts/*
+!scripts/run.ps1
+!scripts/local_trial.py
+designs/**/reference/
+designs/**/screenshots/
+designs/**/_d_meta.json
+!scripts/verify_postgres_budget.py

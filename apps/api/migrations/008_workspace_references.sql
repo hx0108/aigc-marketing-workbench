@@ -1,0 +1,13 @@
+ALTER TABLE records ADD CONSTRAINT uq_records_id_workspace UNIQUE (id, workspace);
+ALTER TABLE records ADD COLUMN ref_sku_id varchar GENERATED ALWAYS AS (CASE WHEN kind IN ('source','profile','work','creation_request') THEN NULLIF(data->>'sku_id','') END) STORED;
+ALTER TABLE records ADD COLUMN ref_profile_id varchar GENERATED ALWAYS AS (CASE WHEN kind IN ('work','creation_request') THEN NULLIF(data->>'profile_id','') END) STORED;
+ALTER TABLE records ADD COLUMN ref_work_id varchar GENERATED ALWAYS AS (CASE WHEN kind IN ('asset','result_revision') THEN NULLIF(data->>'work_id','') END) STORED;
+ALTER TABLE records ADD COLUMN ref_current_result_id varchar GENERATED ALWAYS AS (CASE WHEN kind = 'work' THEN NULLIF(data->>'current_result','') END) STORED;
+ALTER TABLE records ADD CONSTRAINT fk_record_sku_workspace FOREIGN KEY (ref_sku_id,workspace) REFERENCES records(id,workspace) DEFERRABLE INITIALLY DEFERRED NOT VALID;
+ALTER TABLE records ADD CONSTRAINT fk_record_profile_workspace FOREIGN KEY (ref_profile_id,workspace) REFERENCES records(id,workspace) DEFERRABLE INITIALLY DEFERRED NOT VALID;
+ALTER TABLE records ADD CONSTRAINT fk_record_work_workspace FOREIGN KEY (ref_work_id,workspace) REFERENCES records(id,workspace) DEFERRABLE INITIALLY DEFERRED NOT VALID;
+ALTER TABLE records ADD CONSTRAINT fk_record_current_result_workspace FOREIGN KEY (ref_current_result_id,workspace) REFERENCES records(id,workspace) DEFERRABLE INITIALLY DEFERRED NOT VALID;
+CREATE INDEX ix_records_ref_sku_workspace ON records(ref_sku_id,workspace) WHERE ref_sku_id IS NOT NULL;
+CREATE INDEX ix_records_ref_profile_workspace ON records(ref_profile_id,workspace) WHERE ref_profile_id IS NOT NULL;
+CREATE INDEX ix_records_ref_work_workspace ON records(ref_work_id,workspace) WHERE ref_work_id IS NOT NULL;
+CREATE INDEX ix_records_ref_current_result_workspace ON records(ref_current_result_id,workspace) WHERE ref_current_result_id IS NOT NULL;

@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX uq_workspace_merchant_sku ON records (workspace, (COALESCE(NULLIF(data->>'merchant_sku',''),data->>'model'))) WHERE kind='sku' AND COALESCE(NULLIF(data->>'merchant_sku',''),data->>'model')<>'';

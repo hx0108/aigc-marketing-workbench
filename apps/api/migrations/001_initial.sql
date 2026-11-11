@@ -1,0 +1,14 @@
+CREATE TABLE records (id VARCHAR PRIMARY KEY, workspace VARCHAR NOT NULL, kind VARCHAR NOT NULL, revision INTEGER NOT NULL, data JSON NOT NULL);
+CREATE INDEX ix_records_workspace ON records(workspace);
+CREATE INDEX ix_records_kind ON records(kind);
+CREATE TABLE accounts (username VARCHAR PRIMARY KEY, workspace VARCHAR NOT NULL, password_hash VARCHAR NOT NULL);
+CREATE TABLE sessions (digest VARCHAR PRIMARY KEY, workspace VARCHAR NOT NULL, csrf VARCHAR NOT NULL, expires DOUBLE PRECISION NOT NULL);
+CREATE TABLE budgets (id VARCHAR PRIMARY KEY, workspace VARCHAR NOT NULL, cap NUMERIC(14,4) NOT NULL, reserved NUMERIC(14,4) NOT NULL, settled NUMERIC(14,4) NOT NULL, CHECK(cap>=0 AND reserved>=0 AND settled>=0));
+CREATE INDEX ix_budgets_workspace ON budgets(workspace);
+CREATE TABLE tasks (id VARCHAR PRIMARY KEY, workspace VARCHAR NOT NULL, state VARCHAR NOT NULL, phase VARCHAR NOT NULL, fencing_token INTEGER NOT NULL, payload JSON NOT NULL);
+CREATE INDEX ix_tasks_workspace ON tasks(workspace);
+CREATE INDEX ix_tasks_state ON tasks(state);
+CREATE TABLE external_calls (id VARCHAR PRIMARY KEY, intent_key VARCHAR UNIQUE NOT NULL, task_id VARCHAR NOT NULL, state VARCHAR NOT NULL, request_hash VARCHAR NOT NULL);
+CREATE INDEX ix_external_calls_task_id ON external_calls(task_id);
+CREATE TABLE call_reservations (id VARCHAR PRIMARY KEY, budget_id VARCHAR NOT NULL REFERENCES budgets(id), request_hash VARCHAR NOT NULL, upper_bound NUMERIC(14,4) NOT NULL, remaining NUMERIC(14,4) NOT NULL, finalized BOOLEAN NOT NULL);
+CREATE TABLE cost_events (id VARCHAR PRIMARY KEY, call_id VARCHAR NOT NULL REFERENCES call_reservations(id), amount NUMERIC(14,4) NOT NULL, final BOOLEAN NOT NULL, evidence VARCHAR NOT NULL);
