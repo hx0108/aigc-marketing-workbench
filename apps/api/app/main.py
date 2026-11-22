@@ -57,12 +57,23 @@ class Profile(BaseModel):
     facts:dict
     source_ids:list[str]=[]
     candidate_ids:list[str]=[]
+from pathlib import Path as TemplatePath
+import json as template_json
+from secrets import choice as choose_scene
+SCENES=template_json.loads(TemplatePath(__file__).with_name('scene_templates.json').read_text(encoding='utf8'))
+
+@app.get('/api/v1/scene-templates')
+def scene_templates(w=Depends(identity)):
+    return {category:list(items) for category,items in SCENES.items()}
+
 class Creation(BaseModel):
     profile_id:str
     platforms:list[str]=Field(min_length=1,max_length=2)
     duration_seconds:int=Field(gt=0,strict=True)
     brief:str=''
     budget_limit:Decimal|None=Field(default=None,ge=0,max_digits=12,decimal_places=8,allow_inf_nan=False)
+    scene_category:Literal['耳机','吹风机','其他3C']|None=None
+    scene_template:str|None=Field(default=None,max_length=40)
     creative_mode:Literal['provider','photo_campaign']='provider'
     wear_source_id:str|None=Field(default=None,min_length=1,max_length=200)
 @app.get('/health')
@@ -166,6 +177,12 @@ def creation(body:Creation,w=Depends(identity),s=Depends(db)):
     import uuid
     request_id=str(uuid.uuid4())
     request_data={**body.model_dump(mode='json'),'sku_id':p.data['sku_id'],'profile_snapshot':p.data}
+    if body.scene_category or body.scene_template:
+        options=SCENES.get(body.scene_category,{})
+        if body.creative_mode!='provider' or not options or (body.scene_template and body.scene_template not in options):
+            raise HTTPException(422,'场景与所选品类不匹配')
+        selected=body.scene_template or choose_scene(list(options))
+        request_data.update(scene_template=selected,scene_direction=options[selected])
     if body.creative_mode == 'photo_campaign':
         from .photo_campaign import CampaignError, prepare_campaign
         try:
@@ -206,8 +223,10 @@ def creation(body:Creation,w=Depends(identity),s=Depends(db)):
         elif any('PRICE' in code for code in pipeline_blockers):
             blockers=[{'code':'PRICE_CONFIGURATION_REQUIRED','message':'服务价格尚未核验，暂时无法报价，请联系管理员处理'}]
     except ValueError as exc:
-        if str(exc)=='pipeline_not_authorized':
-            blockers=[{'code':'WORKSPACE_AUTHORIZATION_REQUIRED','message':'当前账号尚未开通生成权限，请联系管理员开通'}]
+        if str(exc)=='sponsorship_exhausted':
+            blockers=[{'code':'SPONSORSHIP_EXHAUSTED','message':'平台试用额度已领完，可绑定自己的 API Key 继续创作。'}]
+        elif str(exc)=='pipeline_not_authorized':
+            blockers=[{'code':'WORKSPACE_AUTHORIZATION_REQUIRED','message':'当前工作区尚未绑定模型服务。可直接使用商品照片广告，或在「AI 模型创作」中绑定自己的 API Key。'}]
         else:
             blockers=[{'code':'PRICE_CONFIGURATION_INVALID','message':'当前时长或价格配置无法报价，请联系管理员处理'}]
     except (ImportError,KeyError):
@@ -263,7 +282,7 @@ def detail(collection:str,id:str,include_activity:bool=False,w=Depends(identity)
         result['assets']=[output(get(s,asset_id,w,'asset')) for asset_id in revision.data.get('assets',[])]
     return result
 
-from .auth import authenticate, login, register, LoginSession
+from .auth import authenticate, login, register, LoginSession, account_name
 from fastapi import Response
 import hashlib
 app.dependency_overrides[identity]=authenticate
@@ -271,11 +290,12 @@ class Credentials(BaseModel):
     username:str=Field(min_length=1,max_length=200)
     password:str=Field(min_length=1,max_length=1024)
 class Registration(Credentials):
+    display_name:str=Field(min_length=1,max_length=40)
     model_config=ConfigDict(extra='forbid')
     password:str=Field(min_length=12,max_length=1024)
 @app.post('/api/v1/accounts',status_code=201)
 def sign_up(body:Registration,request:Request,response:Response):
-    return register(body.username,body.password,request,response)
+    return register(body.username,body.password,request,response,body.display_name)
 @app.post('/api/v1/sessions')
 def sign_in(body:Credentials,request:Request,response:Response):
     return login(body.username,body.password,request,response)
@@ -295,7 +315,7 @@ def profiles(id:str,w=Depends(identity),s=Depends(db)):
 @app.get('/api/v1/sessions/current')
 def current_session(request:Request,w=Depends(identity),s=Depends(db)):
     r=s.get(LoginSession,hashlib.sha256(request.cookies['aigc_session'].encode()).hexdigest())
-    return {'csrf_token':r.csrf}
+    return {'csrf_token':r.csrf,'display_name':account_name(s,w)}
 
 @app.post('/api/v1/skus/{id}/sources',status_code=201)
 async def upload_source(id:str,request:Request,w=Depends(identity),s=Depends(db)):
@@ -884,3 +904,14 @@ def preview_subject(id:str,product_id:str,mask_id:str|None=None,w=Depends(identi
     get(s,id,w,'sku')
     return Response(subject_preview(s,w,id,product_id,mask_id),media_type='image/png',
                     headers={'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'})
+from .merchant_keys import MerchantKeys, save as save_merchant_keys, identifier as merchant_key_id
+
+@app.get('/api/v1/merchant-keys')
+def merchant_keys_state(w=Depends(identity),s=Depends(db)):
+    from .execution import Budget
+    budget=s.get(Budget,merchant_key_id(w))
+    return {'configured':bool(budget),'cap':str(budget.cap) if budget else None}
+
+@app.put('/api/v1/merchant-keys')
+def set_merchant_keys(body:MerchantKeys,w=Depends(identity),s=Depends(db)):
+    return save_merchant_keys(s,w,body)

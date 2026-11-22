@@ -68,15 +68,31 @@ def configure(config):
     return readiness()
 
 
-def authorization_snapshot(workspace, request_id):
-    if readiness() or _configuration.get('workspace') != workspace:
+def workspace_configuration(workspace):
+    from app.merchant_keys import merchant_configuration
+    config = _configuration
+    if config and config.get('template'):
+        merchant = merchant_configuration(workspace, config)
+        if merchant is not None:
+            return merchant
+        if config.get("workspace") != workspace and config["template"].get("merchant_allowance_cny"):
+            from app.sponsorship import sponsored_configuration
+            return sponsored_configuration(workspace, config)
+    if not config or config.get('workspace') != workspace:
         raise ValueError('pipeline_not_authorized')
-    return {'request_id':request_id,'providers':{key:provider.model for key,provider in _configuration['providers'].items()},'provider_parameters':{key:provider.parameters for key,provider in _configuration['providers'].items()},**{key:_configuration[key] for key in ('price_version','budget_id','consent_version','bounds')}}
+    return config
+
+
+def authorization_snapshot(workspace, request_id):
+    if readiness():
+        raise ValueError('pipeline_not_authorized')
+    config = workspace_configuration(workspace)
+    return {'request_id':request_id,'providers':{key:provider.model for key,provider in config['providers'].items()},'provider_parameters':{key:provider.parameters for key,provider in config['providers'].items()},**{key:config[key] for key in ('price_version','budget_id','consent_version','bounds')}}
 
 
 def query_task(job):
     from app.execution import ExternalCall
-    config=_configuration
+    config=workspace_configuration(job['workspace'])
     if not config or config.get('workspace')!=job['workspace'] or config.get('video_query_price')!='0':
         raise ValueError('zero_cost_query_not_configured')
     sessions=config['sessions']; results=[]
@@ -106,7 +122,7 @@ def configured_services(job):
         return local_edit_services(job)
     if readiness():
         raise ValueError('pipeline_not_ready')
-    config=_configuration
+    config=workspace_configuration(job['workspace'])
     store_sessions=config['sessions']
     def canceled():
         with store_sessions() as session:
@@ -215,6 +231,11 @@ def handlers(providers, root, font, allowed_hosts, source, save_remote, canceled
                 instruction += (' Each shot must last at most 6 seconds. Use exactly ' + str(count) +
                                 ' shots per platform. Narration must fit naturally without speeding up audio, at most ' +
                                 str(max(1, payload['duration_seconds'] * 2)) + ' Chinese characters per platform.')
+        if not payload.get('scene_direction') and len(payload.get('platforms',[])) == 1 and payload.get('purpose') != 'copy_rewrite':
+            instruction += (' For headphones use scene_1 for outdoor running and scene_2 for commuting. '
+                            'For two or more shots show both situations using their respective asset_slot.')
+        if payload.get('scene_direction'):
+            instruction += ' Every lifestyle shot must follow this selected scene: '+payload['scene_direction']
         response = providers['text'].submit([{'role':'system','content':instruction+' '+json.dumps(direction)},{'role':'user','content':json.dumps(payload,ensure_ascii=False)}])
         save_remote(intent, response)
         result = text_result(response)
@@ -246,22 +267,23 @@ def handlers(providers, root, font, allowed_hosts, source, save_remote, canceled
             from .creative_direction import resolved_plan, image_prompt
             plan=resolved_plan(payload.get('copy',{}).get(owner,{}),payload['request']['facts'],owner)
             prompt=image_prompt(plan)
-            reference_scene = providers['image'].model == 'MiniMax-H3-Image' and plan['category'] == 'headphones'
+            direction=payload['request'].get('scene_direction')
+            reference_scene = providers['image'].model == 'MiniMax-H3-Image' and (plan['category'] == 'headphones' or bool(direction))
+            if direction and not reference_scene:
+                prompt += ' Stage the background for this use case: '+direction
             evidence = {'visual_plan':plan}
             if reference_scene:
-                setting = 'an outdoor athletics track at dusk' if owner == 'douyin' else 'a sunlit riverside path'
-                prompt = (f'Create a new photorealistic side-profile close-up of an adult jogger at {setting}. '
-                          'The jogger wears the exact headphones or earpiece shown in Picture 1 in the '
-                          'anatomically correct position. Keep all visible contours, colors, proportions, '
-                          'materials and markings. Keep the ear and product in sharp focus. No added text.')
-                if payload['request'].get('scene_framing') == 'running_medium':
-                    prompt = (f'Picture 1 is the product reference. Create a new premium sports advertising '
-                              f'photograph at {setting}. Side-tracking medium shot of an adult runner mid-stride, '
-                              'framed from head to hips, both bent arms visible and pumping, shoulders rotating. '
-                              'The nearer ear wears exactly the pearl-white stem earbud from Picture 1 with a '
-                              'brushed silver circular face and single narrow orange stem accent, correct small '
-                              'size. Ear and earbud sharply visible, hair clear of ear, realistic skin. '
-                              'The runner is visibly running, not standing. Vertical composition. No text.')
+                action = ('an adult runner in continuous forward jogging motion on an outdoor track, arms pumping'
+                          if slot == 'scene_1' else
+                          'an adult commuter listening while boarding a train on a daylight station platform')
+                prompt = (f'Create a photorealistic advertising photograph of {action}. '
+                          'Show the person from head to waist with recognizable surroundings. '
+                          'The near ear wears the product in Picture 1 at realistic scale. Preserve its '
+                          'actual material, shape and markings. Keep the ear visible. Vertical frame, no text.')
+                if direction:
+                    action=direction
+                    framing='Establish the location and show the person interacting with the product.' if slot=='scene_1' else 'Show a closer view of the same activity with the product clearly visible.'
+                    prompt=f'Create a photorealistic vertical advertising photograph: {action}. {framing} Preserve the exact product in Picture 1, its proportions, geometry, colour and markings. Show only verified uses. No text.'
                 evidence['reference_sha256'] = source['product']['sha256']
             save_remote(intent+'/creative',{**evidence,'prompt':prompt})
             kwargs = {'reference_image':publish_image(source['product'])} if reference_scene else {}
@@ -278,7 +300,7 @@ def handlers(providers, root, font, allowed_hosts, source, save_remote, canceled
             save_remote(intent, {'id': response.get('id'), 'model': providers['image'].model})
             if reference_scene:
                 return {'path':str(background),'sha256':hashlib.sha256(data).hexdigest(),'worn':True,
-                        'scene_model':providers['image'].model,'reference_sha256':source['product']['sha256']}
+                        'scene_action':action,'selected_scene':bool(direction),'scene_model':providers['image'].model,'reference_sha256':source['product']['sha256']}
         product, mask = renderer.input_path(source['product']), renderer.input_path(source['mask'])
         return place_product(product,mask,background,renderer.path(intent,'.png'))
     def dynamic(payload,intent):
@@ -299,6 +321,13 @@ def handlers(providers, root, font, allowed_hosts, source, save_remote, canceled
                       'Maintain the identity, shape, logo, color, size and position of the photographed '
                       'earpiece on the same ear throughout. Keep the original person, lighting and setting. '
                       'Keep text and audio out of the shot.')
+        if asset.get('scene_action'):
+            prompt = ('Animate this photographed situation continuously: ' + asset['scene_action'] +
+                      '. Track the wearer, keep the earpiece visible and preserve its exact shape and scale. No text.')
+        if asset.get('selected_scene'):
+            prompt='Animate the visible person and product in this situation: '+asset['scene_action']+'. Preserve the reference product, location and activity. Continuous natural movement. No text.'
+        elif shot.get('visual_description'):
+            prompt += ' Shot direction: ' + str(shot['visual_description'])[:1500]
         keyframes = payload.get('keyframes')
         if keyframes and providers['video'].model != 'MiniMax-H3':
             raise ValueError('keyframe_provider_unsupported')
@@ -331,6 +360,16 @@ def handlers(providers, root, font, allowed_hosts, source, save_remote, canceled
         return clip
     def voice(payload,intent):
         response=providers['tts'].submit(payload['text'],payload.get('voice','Cherry'))
+        from .http_providers import MiniMaxSpeech
+        if isinstance(providers['tts'],MiniMaxSpeech):
+            audio=response.get('data',{}).get('audio')
+            if not isinstance(audio,str) or not 0<len(audio)<=24000000:
+                raise ValueError('invalid_minimax_audio')
+            data=bytes.fromhex(audio)
+            path=renderer.path(intent,'.mp3')
+            path.write_bytes(data)
+            save_remote(intent,{'id':response.get('trace_id'),'model':providers['tts'].model})
+            return {'path':str(path),'sha256':hashlib.sha256(data).hexdigest()}
         save_remote(intent,response)
         return fetch(audio_url(response),intent,'audio')
     def still(payload,intent):

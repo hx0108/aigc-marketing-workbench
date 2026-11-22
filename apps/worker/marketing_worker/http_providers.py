@@ -267,3 +267,26 @@ class QwenTTS(HTTPProvider):
         if not text or len(text) > 600:
             raise ValueError('tts_text_length')
         return self.request('POST', '/services/aigc/multimodal-generation/generation', {'model': self.model, 'input': {'text': text, 'voice': voice, 'language_type': 'Chinese'}})
+
+class MiniMaxText(HTTPProvider):
+    defaults = {'max_input_bytes':16384,'max_tokens':4096}
+
+    def submit(self, messages, max_tokens=None):
+        limit = self.parameters['max_tokens']
+        if len(json.dumps(messages,ensure_ascii=False).encode()) > self.parameters['max_input_bytes']:
+            raise TextInputTooLarge('text_input_too_large')
+        response = self.request('POST','/v1/chat/completions',{
+            'model':self.model,'messages':messages,'max_tokens':min(max_tokens or limit,limit),
+            'reasoning_split':True,'stream':False})
+        return response
+
+
+class MiniMaxSpeech(HTTPProvider):
+    def submit(self,text,voice=None):
+        if not text or len(text)>600:
+            raise ValueError('tts_text_length')
+        response=self.request('POST','/v1/t2a_v2',{'model':self.model,'text':text,
+            'stream':False,'output_format':'hex','voice_setting':{'voice_id':'female-shaonv'},
+            'audio_setting':{'sample_rate':32000,'bitrate':128000,'format':'mp3','channel':1}})
+        MiniMaxHailuoFast.check_response(response)
+        return response

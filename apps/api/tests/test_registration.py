@@ -18,8 +18,8 @@ def test_registration_issues_session_without_inheriting_configured_budget(client
     with db.Session.begin() as session:
         session.add(Budget(id='global-owner-budget',workspace='one',cap=10,reserved=0,settled=0))
         session.add(db.Record(id='private-other-product',workspace='one',kind='sku',data={'name':'private'}))
-    signup=client.post('/api/v1/accounts',json={'username':'商家二','password':'fixture-only-pass'})
-    assert signup.status_code==201
+    signup=client.post('/api/v1/accounts',json={'display_name':'小林','username':'商家二','password':'fixture-only-pass'})
+    assert signup.status_code==201 and signup.json()['display_name']=='小林'
     assert 'HttpOnly' in signup.headers['set-cookie'] and 'SameSite=strict' in signup.headers['set-cookie']
     assert client.get('/api/v1/sessions/current').json()==signup.json()
     assert client.get('/api/v1/skus/private-other-product').status_code==404
@@ -58,7 +58,7 @@ def test_registration_issues_session_without_inheriting_configured_budget(client
             assert session.scalar(select(func.count()).select_from(model))==0
     assert client.delete('/api/v1/sessions/current',headers=headers).status_code==204
     assert client.get('/api/v1/sessions/current').status_code==401
-    assert client.post('/api/v1/sessions',json={'username':'商家二','password':'fixture-only-pass'}).status_code==200
+    assert client.post('/api/v1/sessions',json={'display_name':'小林','username':'商家二','password':'fixture-only-pass'}).status_code==200
 
 
 def test_registration_failure_keeps_account_and_session_tables_unchanged(client):
@@ -68,7 +68,7 @@ def test_registration_failure_keeps_account_and_session_tables_unchanged(client)
         ({'username':'new','password':'short'},422),
         ({'username':'new','password':'fixture-only-pass','workspace':'one'},422),
     ]:
-        response=client.post('/api/v1/accounts',json=payload)
+        response=client.post('/api/v1/accounts',json={'display_name':'小林',**payload})
         assert response.status_code==status and 'set-cookie' not in response.headers
     with db.Session() as session:
         assert session.scalar(select(func.count()).select_from(auth.Account))==1
@@ -84,8 +84,8 @@ def test_registration_is_limited_before_password_hashing(client,monkeypatch):
 
     monkeypatch.setattr(auth,'password_hash',hash_password)
     for index in range(5):
-        assert client.post('/api/v1/accounts',json={'username':f'person-{index}','password':'fixture-only-pass'}).status_code==201
-    limited=client.post('/api/v1/accounts',json={'username':'sixth','password':'fixture-only-pass'})
+        assert client.post('/api/v1/accounts',json={'display_name':'小林','username':f'person-{index}','password':'fixture-only-pass'}).status_code==201
+    limited=client.post('/api/v1/accounts',json={'display_name':'小林','username':'sixth','password':'fixture-only-pass'})
     assert limited.status_code==429 and int(limited.headers['retry-after'])>=1
     assert len(seen)==5
 
@@ -104,7 +104,7 @@ def test_concurrent_registration_has_only_one_account_and_session(tmp_path,monke
         response=Response()
         barrier.wait(timeout=5)
         try:
-            result=auth.register('one-username','fixture-only-pass',request,response)
+            result=auth.register('one-username','fixture-only-pass',request,response,'小林')
             assert result['csrf_token'] and 'Secure' in response.headers['set-cookie']
             return 201
         except HTTPException as error:
@@ -125,10 +125,10 @@ def test_login_and_registration_reject_cross_origin_but_accept_same_origin_and_c
     for endpoint,username in (('/api/v1/accounts','new'),('/api/v1/sessions','tester')):
         payload={'username':username,'password':'test-password-123'}
         for origin in ('https://elsewhere.test','null','https://testserver','http://testserver:1234','http://testserver:0'):
-            rejected=client.post(endpoint,json=payload,headers={'Origin':origin})
+            rejected=client.post(endpoint,json={'display_name':'小林',**payload},headers={'Origin':origin})
             assert rejected.status_code==403 and rejected.json()['detail']['code']=='ORIGIN_REJECTED'
             assert 'set-cookie' not in rejected.headers and payload['password'] not in rejected.text
-        accepted=client.post(endpoint,json=payload,headers={'Origin':'http://testserver:80'})
+        accepted=client.post(endpoint,json={'display_name':'小林',**payload},headers={'Origin':'http://testserver:80'})
         assert accepted.status_code in (200,201)
     cli=client.post('/api/v1/sessions',json={'username':'tester','password':'test-password-123'})
     assert cli.status_code==200

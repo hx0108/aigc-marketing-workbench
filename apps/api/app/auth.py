@@ -4,7 +4,7 @@ from fastapi import HTTPException, Request, Response
 from sqlalchemy import String, Float, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
-from .db import Base, Session
+from .db import Base, Session, Record
 class Account(Base):
     __tablename__='accounts'
     username:Mapped[str]=mapped_column(String,primary_key=True)
@@ -66,7 +66,15 @@ def session_response(request,response,token,csrf):
     return {'csrf_token':csrf}
 
 
-def register(username,password,request,response):
+def account_name(session,workspace):
+    profile=session.get(Record,"account-name:"+workspace)
+    return profile.data["name"] if profile else "商家"
+
+
+def register(username,password,request,response,display_name):
+    display_name=display_name.strip()
+    if not display_name or not display_name.isprintable():
+        raise HTTPException(422,"请输入名字")
     require_session_origin(request)
     if not username.isprintable() or username!=username.strip():
         raise HTTPException(422,detail={'code':'USERNAME_INVALID','message':'用户名不能含首尾空格或控制字符'})
@@ -78,6 +86,7 @@ def register(username,password,request,response):
     with Session() as session:
         account=Account(username=username,workspace=workspace,password_hash=password_hash(password))
         try:
+            session.add(Record(id="account-name:"+workspace,workspace=workspace,kind="account_name",data={"name":display_name}))
             session.add(account)
             session.flush()
             token,csrf=add_session(session,workspace)
@@ -87,7 +96,7 @@ def register(username,password,request,response):
             if session.get(Account,username) is None:
                 raise
             raise HTTPException(409,detail={'code':'USERNAME_TAKEN','message':'该用户名已注册'}) from None
-    return session_response(request,response,token,csrf)
+    return {**session_response(request,response,token,csrf),"display_name":display_name}
 
 
 def login(username,password,request,response):
@@ -101,6 +110,7 @@ def login(username,password,request,response):
         try: valid=account and hmac.compare_digest(password_hash(password,account.password_hash.split(':')[0]),account.password_hash)
         except ValueError:valid=False
         if not valid:raise HTTPException(401,'用户名或密码错误')
+        display_name=account_name(s,account.workspace)
         token,csrf=add_session(s,account.workspace)
         s.commit()
-    return session_response(request,response,token,csrf)
+    return {**session_response(request,response,token,csrf),"display_name":display_name}

@@ -1,3 +1,4 @@
+import { MerchantKeys } from './MerchantKeys.jsx';
 import { RepairCanvas } from './RepairCanvas.jsx';
 import { ShotKeyframes } from './ShotKeyframes.jsx';
 import './keyframes.css';
@@ -49,17 +50,18 @@ function FlowApp(){
  const [musicRights,setMusicRights]=useState(false),[uploadingMusic,setUploadingMusic]=useState(false);
  const savingProduct=useRef(false);
  const taskCursor=db.taskCursors?.at(-1);
+ const [displayName,setDisplayName]=useState(DEMO?'演示用户':'商家');
  const [needsLogin,setNeedsLogin]=useState(false),[checkingSession,setCheckingSession]=useState(!DEMO),[sessionError,setSessionError]=useState(false);
  async function reloadData(){
  const revision=++reloadRevision.current;
- const [products,works,tasks]=await Promise.all([request('/skus'),request(listPagePath('works',db.workCursors?.at(-1))),request(listPagePath('tasks',taskCursor))]);
+ const [products,works,tasks,keyState,sceneTemplates]=await Promise.all([request('/skus'),request(listPagePath('works',db.workCursors?.at(-1))),request(listPagePath('tasks',taskCursor)),request('/merchant-keys'),request('/scene-templates')]);
   const mapped=await Promise.all(products.items.map(async p=>{const profiles=await request('/skus/'+p.id+'/profiles');const sources=await request('/skus/'+p.id+'/sources');const selection=await request('/skus/'+p.id+'/source-selection');const profile=profiles.items.find(x=>x.id===profiles.current_profile_id&&x.status==='confirmed');return {...p,code:p.model,spec:p.color,sources:sources.items,sourceSelection:selection.selection,files:sources.items.map(x=>x.name||x.filename),source_ids:sources.items.filter(x=>x.type!=='audio').map(x=>x.id),confirmed:!!profile,profile_id:profile?.id,confirmedSourceIds:profile?.source_ids||[],confirmedProductId:profile?.source_selection?.product?.source_id,confirmedMaskId:profile?.source_selection?.mask?.source_id,type:0,version:p.revision}}));
  const workId=workbenchLocation(location.hash).workId;
  const details=await Promise.all(works.items.map(w=>request('/works/'+w.id)));
  if(workId&&!details.some(w=>w.id===workId)){
   try{details.push(await request('/works/'+encodeURIComponent(workId)))}catch(e){if(e.status!==404)throw e;setToast('当前作品不可用')}
  }
- if(reloadRevision.current===revision)setDb(v=>({...v,products:mapped,runs:details.map(w=>mapWork(w,mapped)),workListIds:works.items.map(w=>w.id),workNext:works.next_cursor,tasks:tasks.items,taskNext:tasks.next_cursor}));
+ if(reloadRevision.current===revision)setDb(v=>({...v,sceneTemplates,prefs:{...v.prefs,creativeMode:v.prefs.creativeMode||(keyState.configured?'provider':'photo_campaign')},products:mapped,runs:details.map(w=>mapWork(w,mapped)),workListIds:works.items.map(w=>w.id),workNext:works.next_cursor,tasks:tasks.items,taskNext:tasks.next_cursor}));
  }
  async function changeListPage(collection,forward){
   if(paging)return;
@@ -82,7 +84,7 @@ function FlowApp(){
    });
   }catch(e){setToast(e.message)}finally{setPaging(false)}
  }
- useEffect(()=>{if(DEMO)return;request('/sessions/current').then(session=>{setCsrfToken(session.csrf_token);return reloadData()}).catch(e=>{if(e.status===401)setNeedsLogin(true);else setSessionError(true)}).finally(()=>setCheckingSession(false))},[]);
+ useEffect(()=>{if(DEMO)return;request('/sessions/current').then(session=>{setDisplayName(session.display_name);setCsrfToken(session.csrf_token);return reloadData()}).catch(e=>{if(e.status===401)setNeedsLogin(true);else setSessionError(true)}).finally(()=>setCheckingSession(false))},[]);
  
  const run=db.runs.find(x=>x.id===db.current),product=db.products[selected]||db.products[0]||{name:'请先新建商品',spec:'',files:[],type:0};
  const pollingWorkId=page===2?db.current:null;
@@ -166,6 +168,10 @@ function FlowApp(){
  function edit(p){if(!DEMO){saveRealDraft(p);return;}patchRun({draft:{...run.draft,...p},reviewed:[],status:'待复核'})}
  function saveText(k,value){const arr=[...run.draft[k]];arr[platform]=value;edit({[k]:arr})}
  function err(msg){setError(msg);return false}
+ const sceneProduct=product?.id||product?.code;
+ const scenePrefs=db.prefs.sceneProduct===sceneProduct?db.prefs:{};
+ const sceneCategory=scenePrefs.sceneCategory||(/耳机|earbud|headphone/i.test(product?.name)?'耳机':/吹风机|电吹风|hair dryer/i.test(product?.name)?'吹风机':'其他3C');
+ function setScene(category,template){setDb(v=>({...v,prefs:{...v.prefs,sceneProduct,sceneCategory:category,sceneTemplate:template}}))}
  const photoCampaign=!DEMO && db.prefs.creativeMode!=='provider';
  const campaignPhotos=(product.sources||[]).filter(source=>source.type==='image'&&source.rights_confirmed
    && !source.deleting && !source.is_subject_mask && source.role!=='mask'
@@ -190,7 +196,7 @@ function FlowApp(){
   if(!product.profile_id)return err('请先确认商品档案。');
   const input={profile_id:product.profile_id,platforms:['douyin','xiaohongshu'].filter((_,i)=>db.prefs.platforms[i]),duration_seconds:+db.prefs.duration,
    ...(photoCampaign?{creative_mode:'photo_campaign',wear_source_id:wearSource?.id||null,brief:(db.prefs.headline||'').trim()}:
-    {creative_mode:'provider',brief:db.prefs.brief,budget_limit:String(db.prefs.budget)})};
+    {creative_mode:'provider',scene_category:sceneCategory,scene_template:scenePrefs.sceneTemplate||null,brief:db.prefs.brief,budget_limit:String(db.prefs.budget)})};
   const signature=JSON.stringify(input);
   const attempt=generationAttempt.current?.signature===signature ? generationAttempt.current : {signature,key:idempotencyKey()};
   generationAttempt.current=attempt;
@@ -495,9 +501,9 @@ function FlowApp(){
    <div><h2>{product.name}</h2><div className="lineitem">{product.spec}<Tag warn={!product.confirmed}>{product.confirmed?'事实已确认':'待确认'}</Tag></div><button onClick={()=>open('product',{index:selected})}>查看事实来源</button></div>
   </div>
   {!DEMO&&<Field label="创作方式"><select name="creative_mode" value={photoCampaign?'photo_campaign':'provider'} onChange={e=>pref('creativeMode',e.target.value)}>
-   <option value="photo_campaign">商品照片广告</option><option value="provider">AI 模型创作</option>
+   <option value="photo_campaign">商品照片广告（本地合成）</option><option value="provider">AI 模型创作（生成使用场景）</option>
   </select></Field>}
-  {photoCampaign&&campaignPhotos.length>0&&<Field label="运动佩戴镜头（入耳式耳机可选）"><select name="wear_source_id" value={wearSource?.id||''} onChange={e=>pref('wearSourceId',e.target.value)}>
+  {!DEMO&&!photoCampaign&&<><Field label="场景品类"><select value={sceneCategory} onChange={e=>setScene(e.target.value,'')}>{Object.keys(db.sceneTemplates||{}).map(k=><option key={k}>{k}</option>)}</select></Field><Field label="使用场景"><select value={scenePrefs.sceneTemplate||''} onChange={e=>setScene(sceneCategory,e.target.value)}><option value="">随机选择</option>{(db.sceneTemplates?.[sceneCategory]||[]).map(k=><option key={k}>{k}</option>)}</select></Field><MerchantKeys/></>}{photoCampaign&&campaignPhotos.length>0&&<Field label="运动佩戴镜头（入耳式耳机可选）"><select name="wear_source_id" value={wearSource?.id||''} onChange={e=>pref('wearSourceId',e.target.value)}>
    <option value="">仅展示商品</option>
    {campaignPhotos.map(photo=><option value={photo.id} key={photo.id}>单只耳机外侧照 · {photo.name}</option>)}
   </select></Field>}
@@ -581,8 +587,8 @@ function FlowApp(){
  const modalTitles={repair:'局部修复',staticFallback:'选择静图替代',manual:'手工接管文案',review:'复核当前作品',rewrite:'智能改写',update:'应用修改',choose:'选择商品',product:'商品资料',new:'新建商品',cancel:'取消后续步骤',unknown:'核查外部结果',facts:'商品事实来源',versions:'历史版本',budget:'调整预算'};
  if(checkingSession)return <div className="auth-page auth-session" role="status">正在连接工作台…</div>;
  if(sessionError)return <div className="auth-page auth-session"><p role="alert">暂时无法连接工作台</p><button onClick={()=>location.reload()}>重新连接</button></div>;
- if(needsLogin)return <AuthScreen onAuthenticated={async()=>{await reloadData();setNeedsLogin(false)}}/>;
- return <><a className="skip" href="#content">跳至主要内容</a><aside><div className="brand"><span className="brandmark"><NavIcon n={0}/></span>映物</div><nav aria-label="主导航">{FLOW_NAMES.map((n,i)=><button key={n} className={page===i?'active':''} aria-current={page===i?'page':undefined} onClick={()=>nav(i)}><FlowNavIcon n={i}/>{n}</button>)}</nav><div className="sidebar-note"><span className="status-dot"></span>{DEMO?'本机交互演示':'营销工作台'}</div><div className="sidebottom"><span className="avatar">林</span><b>林晓</b><span className="muted">商家账号</span></div></aside><main><div id="content" data-screen-label={FLOW_NAMES[page]}><div className="title"><h1>{page===2&&run?.content?'作品详情':FLOW_NAMES[page]}</h1>{page===1?<button className="primary" onClick={()=>open('new')}>新建商品</button>:page!==2?<button className="primary" onClick={()=>start()}>新建创作</button>:run&&<Tag>{run.product.name}</Tag>}</div>{[home,catalog,workspace,works,tasks][page]}</div></main>
+ if(needsLogin)return <AuthScreen onAuthenticated={async(session)=>{setDisplayName(session.display_name);await reloadData();setNeedsLogin(false)}}/>;
+ return <><a className="skip" href="#content">跳至主要内容</a><aside><div className="brand"><span className="brandmark"><NavIcon n={0}/></span>映物</div><nav aria-label="主导航">{FLOW_NAMES.map((n,i)=><button key={n} className={page===i?'active':''} aria-current={page===i?'page':undefined} onClick={()=>nav(i)}><FlowNavIcon n={i}/>{n}</button>)}</nav>{DEMO&&<div className="sidebar-note">本机交互演示</div>}<div className="sidebottom"><span className="avatar">{Array.from(displayName||'商家')[0]}</span><b title={displayName}>{displayName}</b></div></aside><main><div id="content" data-screen-label={FLOW_NAMES[page]}><div className="title"><h1>{page===2&&run?.content?'作品详情':FLOW_NAMES[page]}</h1>{page===1?<button className="primary" onClick={()=>open('new')}>新建商品</button>:page!==2?<button className="primary" onClick={()=>start()}>新建创作</button>:run&&<Tag>{run.product.name}</Tag>}</div>{[home,catalog,workspace,works,tasks][page]}</div></main>
  <dialog ref={dialog} aria-labelledby="dialog-title" onCancel={close}><form onSubmit={submit}><div className="bar"><h2 id="dialog-title">{modalTitles[modal?.type]}</h2><button type="button" aria-label="关闭弹窗" onClick={close}>×</button></div>{error&&<div className="error" role="alert">{error}</div>}
  {modal?.type==='manual'&&<>{(DEMO?run.platforms:['douyin','xiaohongshu'].map(p=>modal.task.manual_copy_platforms.includes(p))).map((on,i)=>on&&<section className="review-platform" key={i}><h3>{['抖音','小红书'][i]}</h3><Field label={['抖音','小红书'][i]+'标题'}><input name={'title'+i}/></Field><Field label={['抖音','小红书'][i]+'发布文案'}><textarea name={'body'+i}/></Field>{[0,1,2].map(j=><Field key={j} label={['抖音','小红书'][i]+'第'+(j+1)+'镜口播'}><input name={'shot'+j+i}/></Field>)}{!DEMO&&<><Field label="海报标题"><input name={'posterTitle'+i}/></Field><Field label="海报卖点"><textarea name={'posterPoints'+i}/></Field></>}</section>)}{!DEMO&&<label className="check"><input type="checkbox" name="consent"/>确认使用人工稿继续原任务</label>}</>}
  {modal?.type==='choose'&&<div className="choose-list">{db.products.map((p,i)=><button type="button" key={p.code} onClick={()=>{setSelected(i);pref('productCode',db.products[i].code);close()}}><span>{p.name} · {p.spec}</span><Tag warn={!p.confirmed}>{p.confirmed?'已确认':'待确认'}</Tag></button>)}</div>}

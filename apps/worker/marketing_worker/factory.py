@@ -1,19 +1,21 @@
 """Explicit composition root; never loads credentials from arbitrary desktop files."""
-from .http_providers import DeepSeek, MiniMaxH3Image, MiniMaxHailuoFast, MiniMaxImage, MiniMaxVideo, QwenTTS
+from .http_providers import MiniMaxText, MiniMaxSpeech, DeepSeek, MiniMaxH3Image, MiniMaxHailuoFast, MiniMaxImage, MiniMaxVideo, QwenTTS
 from app.pricing import HAILUO_FAST_MODEL
 from .persistence import AuthorizedServices
 
 
 REQUIRED = {'text', 'product_image', 'dynamic', 'tts', 'video_render', 'poster_render'}
 
-def provider_adapters(video_model, image_model=None):
+def provider_adapters(video_model, image_model=None, text_model=None, tts_model=None):
     image = MiniMaxH3Image if image_model == 'MiniMax-H3-Image' else MiniMaxImage
-    return {'text':DeepSeek,'image':image,'video':MiniMaxHailuoFast if video_model==HAILUO_FAST_MODEL else MiniMaxVideo,'tts':QwenTTS}
+    return {'text':MiniMaxText if text_model=='MiniMax-M2.7' else DeepSeek,'image':image,'video':MiniMaxHailuoFast if video_model==HAILUO_FAST_MODEL else MiniMaxVideo,'tts':MiniMaxSpeech if tts_model=='speech-02-turbo' else QwenTTS}
 
 def build_providers(config, environment, client=None):
     result = {}
-    adapters=provider_adapters(config['video']['model'], config['image']['model'])
+    adapters=provider_adapters(config['video']['model'], config['image']['model'],config['text']['model'],config['tts']['model'])
     for kind, key in [('text','DEEPSEEK_API_KEY'),('image','MINIMAX_API_KEY'),('video','MINIMAX_API_KEY'),('tts','DASHSCOPE_API_KEY')]:
+        if adapters[kind] in (MiniMaxText,MiniMaxSpeech):
+            key='MINIMAX_API_KEY'
         selected = config[kind]
         result[kind] = adapters[kind](environment[key], selected['base_url'], selected['model'], client,parameters=selected.get('parameters'))
     return result

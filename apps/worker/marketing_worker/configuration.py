@@ -20,7 +20,7 @@ def verify_consent(session, job, settings):
         raise ValueError('processing_consent_required')
     expected={key:settings.get(key) for key in ('price_version','budget_id','consent_version','bounds')}
     expected['providers']={key:value['model'] for key,value in settings['providers'].items()}
-    adapters=provider_adapters(expected['providers'].get('video'), expected['providers'].get('image'))
+    adapters=provider_adapters(expected['providers'].get('video'), expected['providers'].get('image'),expected['providers'].get('text'),expected['providers'].get('tts'))
     expected['provider_parameters']={key:{**adapters[key].defaults,**value.get('parameters',{})} for key,value in settings['providers'].items()}
     if any(consent.data.get(key)!=value for key,value in expected.items()):
         raise ValueError('authorization_scope_changed')
@@ -57,9 +57,15 @@ def read_credentials(path):
 
 def load_configuration(path, sessions=Session):
     settings=json.loads(Path(path).read_text(encoding='utf-8'))
+    config=compose_configuration(settings, read_credentials(settings['credentials_file']), sessions)
+    config['template']=settings
+    return configure(config)
+
+
+def compose_configuration(settings, credentials, sessions):
     from .media import timeline_font_options
     timeline_font_options(settings.get('font'))
-    providers=build_providers(settings['providers'],read_credentials(settings['credentials_file']))
+    providers=build_providers(settings['providers'],credentials)
     def source_factory(job):
         from .source_resolver import resolve_sources
         return resolve_sources(sessions,job,settings['private_root'],settings.get('sources',{}))
@@ -93,4 +99,4 @@ def load_configuration(path, sessions=Session):
             image.verify()
         return 'data:'+mime+';base64,'+base64.b64encode(data).decode('ascii')
     config={**settings,'providers':providers,'sessions':sessions,'policy_factory':policy_factory,'source_factory':source_factory,'save_remote':save_remote,'publish_image':publish_image}
-    return configure(config)
+    return config
