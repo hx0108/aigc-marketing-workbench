@@ -65,7 +65,11 @@ def main():
     STORAGE.mkdir(parents=True, exist_ok=True)
     os.environ['DATABASE_URL'] = 'sqlite:///' + (TRIAL / 'app.db').as_posix()
     os.environ['AIGC_STORAGE_ROOT'] = str(STORAGE)
-    os.environ.pop('AIGC_PIPELINE_CONFIG', None)
+    trial_config = TRIAL / 'pipeline.json'
+    if trial_config.is_file():
+        os.environ['AIGC_PIPELINE_CONFIG'] = str(trial_config)
+    else:
+        os.environ.pop('AIGC_PIPELINE_CONFIG', None)
     os.environ.pop('AIGC_RULESET_FILE', None)
     sys.path[:0] = [str(ROOT / 'apps' / name) for name in ('api', 'worker')]
     from app.main import app

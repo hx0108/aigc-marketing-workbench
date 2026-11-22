@@ -2,6 +2,7 @@ from fastapi import FastAPI, Header, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ConfigDict
 from decimal import Decimal
+from typing import Literal
 from sqlalchemy import select, func
 from .db import Session, Record, initialize
 import os
@@ -61,7 +62,9 @@ class Creation(BaseModel):
     platforms:list[str]=Field(min_length=1,max_length=2)
     duration_seconds:int=Field(gt=0,strict=True)
     brief:str=''
-    budget_limit:Decimal|None=Field(default=None,gt=0,max_digits=12,decimal_places=8,allow_inf_nan=False)
+    budget_limit:Decimal|None=Field(default=None,ge=0,max_digits=12,decimal_places=8,allow_inf_nan=False)
+    creative_mode:Literal['provider','photo_campaign']='provider'
+    wear_source_id:str|None=Field(default=None,min_length=1,max_length=200)
 @app.get('/health')
 def health():
     try:
@@ -162,7 +165,20 @@ def creation(body:Creation,w=Depends(identity),s=Depends(db)):
     if len(set(body.platforms))!=len(body.platforms) or not set(body.platforms)<={'douyin','xiaohongshu'}:raise HTTPException(422,detail={'code':'INVALID_PLATFORM'})
     import uuid
     request_id=str(uuid.uuid4())
-    blockers=[{'code':'PROVIDER_NOT_CONFIGURED','message':'尚未配置生成服务和价格，无法授权执行'}]
+    request_data={**body.model_dump(mode='json'),'sku_id':p.data['sku_id'],'profile_snapshot':p.data}
+    if body.creative_mode == 'photo_campaign':
+        from .photo_campaign import CampaignError, prepare_campaign
+        try:
+            request_data=prepare_campaign(s,w,request_data)
+        except CampaignError as error:
+            raise HTTPException(422,detail=error.detail) from None
+        record=Record(id=request_id,workspace=w,kind='creation_request',data=request_data)
+        s.add(record);s.commit();return output(record)
+    if body.wear_source_id is not None:
+        raise HTTPException(422,detail={'code':'WEAR_PHOTO_MODE_REQUIRED','message':'佩戴照片仅用于照片广告创作。'})
+    if body.budget_limit == 0:
+        raise HTTPException(422,detail={'code':'BUDGET_LIMIT_INVALID','message':'模型创作的预算上限须大于零。'})
+    blockers=[{'code':'PROVIDER_NOT_CONFIGURED','message':'当前工作台的 AI 生成服务尚未就绪，请联系管理员检查模型配置。'}]
     quote=None
     try:
         from marketing_worker.business import readiness,authorization_snapshot
@@ -198,7 +214,7 @@ def creation(body:Creation,w=Depends(identity),s=Depends(db)):
         blockers=[{'code':'PIPELINE_CONFIGURATION_INCOMPLETE','message':'生成配置不完整，请联系管理员处理'}]
     if set(p.data.get('source_selection',{}))!={'product','mask'}:
         blockers.append({'code':'SOURCE_SELECTION_REQUIRED','message':'请选择并复核商品原图与同尺寸遮罩，然后建立新的档案版本'})
-    record=Record(id=request_id,workspace=w,kind='creation_request',data={**body.model_dump(mode='json'),'sku_id':p.data['sku_id'],'profile_snapshot':p.data,'status':'ready' if not blockers else 'blocked','blockers':blockers,'quote':quote})
+    record=Record(id=request_id,workspace=w,kind='creation_request',data={**request_data,'status':'ready' if not blockers else 'blocked','blockers':blockers,'quote':quote})
     s.add(record);s.commit();return output(record)
 class RunConsent(BaseModel):
     authorized:bool=False
@@ -316,7 +332,8 @@ async def upload_source(id:str,request:Request,w=Depends(identity),s=Depends(db)
         raise HTTPException(413,'商品素材配额不足')
     try:
         s.delete(reservation)
-        return create(s,w,'source',{'sku_id':id,'name':name,'size':size,'type':kind,'object_key':key,'sha256':digest,'rights_confirmed':True,'parse_status':'pending'})
+        role = {'role':'mask'} if kind == 'image' and request.headers.get('X-Source-Purpose') == 'repair-mask' else {}
+        return create(s,w,'source',{'sku_id':id,'name':name,'size':size,'type':kind,'object_key':key,'sha256':digest,'rights_confirmed':True,'parse_status':'pending',**role})
     except BaseException:
         s.rollback()
         (ROOT/key).unlink(missing_ok=True)
@@ -360,7 +377,7 @@ def edit_work(id:str,body:DraftPatch,w=Depends(identity),s=Depends(db)):
         return output(work)
     if previous.get('restore_revision_id'):
         raise HTTPException(409,detail={'code':'RESTORE_DRAFT_PENDING','message':'请先应用或撤销历史恢复草稿'})
-    allowed={'platform','title','body','narration','voice','music','subtitle_style','poster_title','poster_points','poster_layout','asset_id','shots'}
+    allowed={'platform','title','body','narration','voice','music','subtitle_style','poster_title','poster_points','poster_layout','asset_id','shots','shot_motion_indices'}
     if not set(body.changes)<=allowed:raise HTTPException(422,'未知编辑字段')
     if 'poster_layout' in body.changes and body.changes['poster_layout'] not in ('classic','product_top'):
         raise HTTPException(422,detail={'code':'POSTER_LAYOUT_INVALID'})
@@ -788,8 +805,18 @@ def list_facts(id:str,w=Depends(identity),s=Depends(db)):
     return {'items':items,'conflicting_keys':conflicts}
 
 class RepairRequest(BaseModel):
-    original_source_id:str
+    original_source_id:str|None=None
     mask_source_id:str
+    instruction:str|None=Field(default=None,min_length=1,max_length=500)
+    quote_id:str|None=None
+    authorized:bool=False
+
+@app.get('/api/v1/assets/{id}/repair-quote')
+def repair_quote(id:str,w=Depends(identity),s=Depends(db)):
+    from .repair_quotes import quote_repair
+    candidate=get(s,id,w,'asset')
+    work=get(s,candidate.data['work_id'],w,'work')
+    return quote_repair(s,w,work)[0]
 
 @app.post('/api/v1/assets/{id}/apply-repair')
 def apply_repair(id:str,body:RevisionAction,w=Depends(identity),s=Depends(db)):
@@ -804,28 +831,46 @@ def repair_asset(id:str,body:RepairRequest,idempotency_key:str=Header(default=''
     profile=get(s,work.data['profile_id'],w,'profile')
     if profile.data.get('status')!='confirmed':raise HTTPException(409,detail={'code':'FACT_REVOKED'})
     if candidate.data.get('media_kind') not in {'product_image','marketing_poster','cover'}:raise HTTPException(422,'仅支持图片局部修复')
-    for source_id in (body.original_source_id,body.mask_source_id):
+    if (body.original_source_id is None)==(body.instruction is None) or (body.instruction is not None and not body.instruction.strip()):
+        raise HTTPException(422,detail={'code':'REPAIR_MODE_INVALID'})
+    input_sha256={candidate.id:candidate.data.get('repair_render_sha256') or candidate.data['sha256']}
+    for source_id in filter(None,(body.original_source_id,body.mask_source_id)):
         source=get(s,source_id,w,'source')
         if source.data.get('sku_id')!=work.data['sku_id'] or source.data.get('type')!='image' or not source.data.get('rights_confirmed'):raise HTTPException(422,'修复素材不符合当前商品范围')
+        input_sha256[source.id]=source.data['sha256']
     if not idempotency_key:raise HTTPException(422,'缺少幂等键')
     task_id=str(uuid.uuid5(uuid.NAMESPACE_URL,w+':repair:'+idempotency_key))
-    payload={'work_id':work.id,'candidate_asset_id':id,**body.model_dump()}
+    payload={'work_id':work.id,'candidate_asset_id':id,**body.model_dump(exclude_defaults=True)}
     old=s.get(Task,task_id)
     if old:
         if any(old.payload.get(k)!=v for k,v in payload.items()):raise HTTPException(409,detail={'code':'IDEMPOTENCY_CONFLICT'})
         return {'task_id':old.id}
+    payload['repair_input_sha256']=input_sha256
+    if body.instruction is not None:
+        from .repair_quotes import quote_repair
+        quote,config=quote_repair(s,w,work)
+        if not quote['executable']:raise HTTPException(409,detail={'code':quote['blocker']})
+        if not body.authorized or body.quote_id!=quote['quote_id']:raise HTTPException(409,detail={'code':'CHANGE_QUOTE_REQUIRED'})
+        scope={'work_id':work.id,'profile_id':profile.id,'candidate_asset_id':id,
+               'mask_source_id':body.mask_source_id,'instruction':body.instruction,'quote_id':body.quote_id,
+               'repair_input_sha256':input_sha256}
+        consent=Record(id=task_id+':consent',workspace=w,kind='processing_consent',
+                       data={**config,**scope,'cost_upper_bound':quote['cost_upper_bound']})
+        s.add(consent)
+        payload.update(profile_id=profile.id,consent_id=consent.id)
     s.add(Task(id=task_id,workspace=w,state='queued',phase='repair_asset',payload=payload));s.commit()
     return {'task_id':task_id}
 
 class SourceSelection(BaseModel):
     expected_revision:int
     product_source_id:str
-    mask_source_id:str
+    mask_source_id:str|None=None
+    mode:str='cutout'
     reviewed:bool=False
 @app.post('/api/v1/skus/{id}/source-selection')
 def source_selection(id:str,body:SourceSelection,w=Depends(identity),s=Depends(db)):
     from .source_selection import select_sources
-    return select_sources(s,w,id,body.expected_revision,body.product_source_id,body.mask_source_id,body.reviewed)
+    return select_sources(s,w,id,body.expected_revision,body.product_source_id,body.mask_source_id,body.reviewed,body.mode)
 @app.get('/api/v1/skus/{id}/source-selection')
 def current_source_selection(id:str,w=Depends(identity),s=Depends(db)):
     sku=get(s,id,w,'sku')
@@ -834,7 +879,7 @@ def current_source_selection(id:str,w=Depends(identity),s=Depends(db)):
 
 
 @app.get('/api/v1/skus/{id}/subject-preview')
-def preview_subject(id:str,product_id:str,mask_id:str,w=Depends(identity),s=Depends(db)):
+def preview_subject(id:str,product_id:str,mask_id:str|None=None,w=Depends(identity),s=Depends(db)):
     from .source_selection import subject_preview
     get(s,id,w,'sku')
     return Response(subject_preview(s,w,id,product_id,mask_id),media_type='image/png',

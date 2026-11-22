@@ -83,6 +83,8 @@ def task_view(session,task):
 
 
 ERROR_MESSAGES={
+ 'WEAR_PHOTO_CUTOUT_REQUIRED':('这张照片的耳机轮廓未能分离。','请选择单只耳机的清晰外侧照，或在创作设置中使用商品展示。','material'),
+ 'PHOTO_SOURCE_CHANGED':('商品照片或素材使用权已变化。','请重新确认商品档案并生成。','material'),
  'NUMERIC_CLAIM_REVIEW_REQUIRED':('生成文案包含尚未确认的数字或参数，已停止生成。','请核对商品事实与文案中的数字，再处理失败阶段。','copy'),
  'text_input_too_large':('商品资料超过文案服务输入上限，已停止生成。','请缩减商品事实或创意要求后重新创作。','copy'),
  'voice_duration_mismatch':('配音时长超过视频时长，已停止合成。','请缩短口播或调整视频时长。','voice'),

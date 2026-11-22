@@ -72,6 +72,28 @@ class EditIntegrationTests(unittest.TestCase):
             self.assertEqual([kind for kind,_ in calls],['dynamic','video_render'])
             self.assertEqual(calls[0][1]['shot']['asset_slot'],'scene_2')
             self.assertEqual(visual['step_sources']['douyin/dynamic/0'],'shot-visual')
+            wearing=copy.deepcopy(base)
+            wearing['copy']['douyin']['shots'][0]['asset_slot']='scene_1'
+            wearing['render_settings']={'douyin':{'creative_mode':'photo_campaign','poster_scene':'scene_1'}}
+            with sessions.begin() as session:
+                session.add_all([Record(id='work',workspace='ws',kind='work',data={'creation_request_id':'req'}),
+                                 Record(id='req',workspace='ws',kind='creation_request',data={'wear_source_id':'ear'})])
+                image=session.get(Record,'original:image/scene_1')
+                image.data={**image.data,'result':{'worn':True,'sha256':'first-frame'}}
+            calls.clear()
+            with patch('app.photo_campaign.resolve_photos') as check_sources:
+                animate=execute('animate',{'shot_motion_indices':[0]},wearing)
+            check_sources.assert_called_once()
+            self.assertEqual([kind for kind,_ in calls],['dynamic','video_render'])
+            self.assertEqual(calls[0][1]['images']['scene_1']['sha256'],'first-frame')
+            self.assertEqual(animate['step_sources']['douyin/dynamic/0'],'animate')
+            calls.clear()
+            with patch('app.photo_campaign.resolve_photos',side_effect=ValueError('photo_source_changed')):
+                with self.assertRaisesRegex(ValueError,'photo_source_changed'):
+                    execute('revoked-motion',{'shot_motion_indices':[0]},wearing)
+            self.assertEqual(calls,[])
+            execute('cancel-motion',{'shot_motion_indices':[], 'subtitle_style':'small'},wearing)
+            self.assertEqual([kind for kind,_ in calls],['video_render'])
             with sessions.begin() as session:
                 session.add(Record(id='repaired',workspace='ws',kind='asset',data={
                     'work_id':'work','media_kind':'product_image','slot':'scene_2','repair_task_id':'repair',

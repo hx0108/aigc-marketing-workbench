@@ -1,0 +1,10 @@
+.creation-preview { padding: 12px 0; }
+.creation-preview h3, .creation-preview h4 { margin: 8px 0; }
+.creation-preview p { margin: 8px 0; overflow-wrap: anywhere; }
+.creation-preview-photos { display: flex; gap: 10px; flex-wrap: wrap; }
+.creation-preview-photos figure { margin: 0; width: 88px; }
+.creation-preview-photos img { width: 88px; height: 88px; object-fit: contain; background: #f2f4f4; border-radius: 6px; }
+.creation-preview-photos figcaption { font-size: 12px; }
+.creation-preview-shots { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; list-style: none; margin: 0; }
+.creation-preview-shots li { border: 1px solid #dce4e4; border-radius: 6px; padding: 6px 10px; display: grid; gap: 3px; max-width: 165px; overflow-wrap: anywhere; }
+.creation-preview-shots li span + span { color: #54686a; font-size: 12px; }

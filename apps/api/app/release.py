@@ -107,16 +107,19 @@ def label_binding(asset,rules):
     return {'rule_version':rules['version'],'rule_sha256':rules_fingerprint(rules),
             'release_sha256':asset.data.get('release_sha256'),'asset_revision':asset.revision}
 
+def needs_visible_review(asset):
+    kind=asset.data.get('media_kind')
+    return kind in LABELLED_KINDS or (kind=='product_image' and asset.data.get('slot') in {'scene_1','scene_2'})
 
 def require_label_verification(asset,rules):
-    if asset.data.get('media_kind') not in LABELLED_KINDS:return
+    if not needs_visible_review(asset):return
     verification=asset.data.get('label_verification') or {}
     if any(verification.get(key)!=value for key,value in label_binding(asset,rules).items()) or not verification.get('reviewer') or not verification.get('evidence'):
         raise ValueError('LABEL_VERIFICATION_REQUIRED')
 
 
 def verify_label(asset,rules,expected_revision,expected_sha256,reviewer,evidence):
-    if asset.data.get('media_kind') not in LABELLED_KINDS:raise ValueError('LABEL_NOT_APPLICABLE')
+    if not needs_visible_review(asset):raise ValueError('LABEL_NOT_APPLICABLE')
     if asset.data.get('review')!='approved':raise ValueError('REVIEW_REQUIRED')
     if asset.revision!=expected_revision or asset.data.get('release_sha256')!=expected_sha256:raise ValueError('VERSION_CONFLICT')
     if not reviewer.strip() or not evidence.strip() or len(reviewer)>120 or len(evidence)>500:raise ValueError('LABEL_EVIDENCE_REQUIRED')

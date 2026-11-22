@@ -17,6 +17,59 @@ class ShotEditTests(unittest.TestCase):
 
     def tearDown(self):self.s.close();self.engine.dispose()
 
+    def test_approved_keyframes_are_quoted_as_one_dynamic_shot(self):
+        import hashlib
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+        from PIL import Image
+        from app import sources
+        from app.change_quotes import calculate_quote
+        from marketing_worker import business
+
+        draft = {'shots':[{'index':0,'first_frame_asset_id':'start','last_frame_asset_id':'finish'}]}
+        self.work.data={**self.work.data,'creation_request_id':'request','draft':draft}
+        self.result.data={**self.result.data,'assets':['start','finish'],
+                          'copy':{'douyin':{'shots':[{'asset_slot':'white','duration':6}]}}}
+        with TemporaryDirectory() as folder, patch.object(sources,'ROOT',Path(folder)):
+            for identifier,color in [('start','red'),('finish','blue')]:
+                file=Path(folder)/(identifier+'.png')
+                Image.new('RGB',(360,640),color).save(file)
+                self.s.add(Record(id=identifier,workspace='w',kind='asset',data={
+                    'work_id':'work','media_kind':'product_image','review':'approved',
+                    'object_key':file.name,'sha256':hashlib.sha256(file.read_bytes()).hexdigest()}))
+            self.s.commit()
+            self.assertEqual(plan(self.s,self.work,draft,include_durations=True),
+                             ({'keyframes','dynamic','video_compose'},[6]))
+            authorization={'providers':{'video':'MiniMax-H3'},'bounds':{'dynamic':'3'},
+                           'price_version':'test','budget_id':'budget'}
+            with patch.object(business,'readiness',return_value=[]), patch.object(
+                    business,'authorization_snapshot',return_value=authorization):
+                quote, consent=calculate_quote(self.s,'w',self.work)
+                self.assertEqual(quote['cost_upper_bound'],'3')
+                self.assertEqual(consent['keyframe_bindings']['0'],
+                                 [self.s.get(Record,identifier).data['sha256'] for identifier in ('start','finish')])
+                authorization['providers']['video']='MiniMax-Hailuo-2.3-Fast'
+                quote,_=calculate_quote(self.s,'w',self.work)
+                self.assertEqual(quote['blockers'],['KEYFRAME_PROVIDER_UNSUPPORTED'])
+            file.write_bytes(b'changed')
+            with self.assertRaises(HTTPException) as error:
+                plan(self.s,self.work,draft)
+            self.assertEqual(error.exception.detail['code'],'KEYFRAME_ASSET_REQUIRED')
+
+    def test_explicit_wearing_motion_has_one_paid_shot(self):
+        self.work.data={**self.work.data,'creation_request_id':'request'}
+        self.s.add(Record(id='request',workspace='w',kind='creation_request',
+                          data={'creative_mode':'photo_campaign','wear_source_id':'ear'}))
+        self.result.data={**self.result.data,'render_settings':{'douyin':{'poster_scene':'scene_1'}},
+                          'copy':{'douyin':{'shots':[{'asset_slot':'scene_1','duration':4}]}}}
+        self.s.commit()
+        self.assertEqual(plan(self.s,self.work,{'shot_motion_indices':[0]},include_durations=True),
+                         ({'dynamic','video_compose'},[4]))
+        for invalid in ([1],[True],[0,0],0):
+            with self.assertRaises(HTTPException):plan(self.s,self.work,{'shot_motion_indices':invalid})
+        self.assertEqual(plan(self.s,self.work,{'shot_motion_indices':[]}),(set(),0))
+
     def test_narration_only_once_and_visual_static_is_free(self):
         nodes,count=plan(self.s,self.work,{'shots':[{'index':0,'narration':'x'},{'index':1,'narration':'y'}]})
         self.assertEqual(nodes,{'tts','subtitles','video_compose'});self.assertEqual(count,0)

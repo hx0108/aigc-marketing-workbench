@@ -43,9 +43,9 @@ class HTTPProvider:
     def validate_parameters(self):
         pass
 
-    def request(self, method, path, payload=None):
+    def request(self, method, path, payload=None, *, timeout=httpx.USE_CLIENT_DEFAULT):
         try:
-            response = self.client.request(method, self.base_url + path, headers=self.headers, json=payload)
+            response = self.client.request(method, self.base_url + path, headers=self.headers, json=payload, timeout=timeout)
         except httpx.TransportError as error:
             raise ExternalUnknown('Provider response unavailable; do not resubmit', transport_error=type(error).__name__) from None
         if response.status_code >= 500:
@@ -110,6 +110,41 @@ class MiniMaxImage(HTTPProvider):
         return response
 
 
+class MiniMaxH3Image(HTTPProvider):
+    defaults = {'size': '1152x2048', 'n': 1, 'response_format': 'b64_json', 'output_format': 'png'}
+
+    def validate_parameters(self):
+        if (self.model != 'MiniMax-H3-Image' or self.parameters != self.defaults
+                or type(self.parameters['n']) is not int):
+            raise ValueError('unsupported_minimax_image_configuration')
+
+    def submit(self, prompt, *, reference_image=None):
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError('invalid_minimax_image_prompt')
+        payload = {'model': self.model, 'prompt': prompt, **self.parameters}
+        path = '/v1/images/generations'
+        if reference_image is not None:
+            references = [reference_image] if isinstance(reference_image, str) else reference_image
+            if not isinstance(references, list) or not 1 <= len(references) <= 16 or any(
+                not isinstance(reference, str) or not reference.startswith(
+                    ('data:image/png;base64,', 'data:image/jpeg;base64,', 'data:image/webp;base64,'))
+                for reference in references
+            ):
+                raise ValueError('invalid_minimax_reference_image')
+            payload['images'] = [{'image_url': reference} for reference in references]
+            path = '/v1/images/edits'
+        response = self.request('POST', path, payload, timeout=600)
+        try:
+            item, = response['data']
+            encoded = item['b64_json']
+            request_id = response['request_id']
+            if not isinstance(request_id, str) or not request_id or not isinstance(encoded, str) or not encoded:
+                raise ValueError()
+        except (KeyError, ValueError, TypeError):
+            raise ExternalUnknown('Invalid MiniMax H3 image result') from None
+        return {'id': request_id, 'data': {'image_base64': [encoded]}, 'usage': response.get('usage')}
+
+
 class MiniMaxVideo(HTTPProvider):
     defaults = {'resolution': '768P', 'ratio': 'adaptive', 'aigc_watermark': True}
 
@@ -121,12 +156,12 @@ class MiniMaxVideo(HTTPProvider):
     def submit(self, content, duration=5):
         from app.pricing import minimax_video_seconds
         seconds = minimax_video_seconds(duration)
-        if (len(content) != 2 or content[0].get('type') != 'text' or
-            content[1].get('type') != 'image_url'):
+        if (len(content) not in (2,3) or content[0].get('type') != 'text' or
+            any(item.get('type') != 'image_url' for item in content[1:])):
             raise ValueError('minimax_video_requires_one_first_frame')
-        first_frame = {**content[1], 'role': 'first_frame'}
+        frames = [{**item,'role':role} for item,role in zip(content[1:], ('first_frame','last_frame'))]
         response = self.request('POST', '/v2/video_generation', {
-            'model': self.model, 'content': [content[0], first_frame],
+            'model': self.model, 'content': [content[0], *frames],
             'duration': seconds, **self.parameters})
         task_id = response.get('task_id') if isinstance(response, dict) else None
         if not isinstance(task_id, str) or not re.fullmatch(r'[0-9]{1,32}', task_id):

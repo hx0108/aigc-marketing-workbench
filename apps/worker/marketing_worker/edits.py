@@ -11,6 +11,8 @@ def edit_handler(repository,job,services_factory):
     base=payload['base_result']
     render_settings=copy.deepcopy(base.get('render_settings',{}))
     settings=render_settings.setdefault(platform,{})
+    campaign_context = ({'campaign_platform':platform, 'product_name':settings.get('product_name','')}
+                        if settings.get('creative_mode') == 'photo_campaign' else {})
     for key in ('voice','music','subtitle_style','asset_id','poster_layout'):
         if key in draft:settings[key]=draft[key]
     services=services_factory(job)
@@ -19,11 +21,21 @@ def edit_handler(repository,job,services_factory):
     content=copy.deepcopy(base['copy'][platform])
     shot_changes=draft.get('shots',[])
     from fastapi import HTTPException
-    from app.shot_edits import merge_shots
+    from app.shot_edits import KEYFRAME_FIELDS, keyframe_assets, merge_shots
     try:shot_changes=merge_shots([],shot_changes)
     except HTTPException as error:raise ValueError(error.detail['code'].lower()) from None
     uploaded={}; reverted_sources=set(); shot_video_sources=dict(settings.get('shot_video_sources',{}))
     changed_visual=set(); changed_narration=False; seen=set()
+    motion = draft.get('shot_motion_indices', [])
+    if motion != []:
+        if (not campaign_context or not isinstance(motion, list) or len(motion) != 1
+                or type(motion[0]) is not int or motion[0] != 0 or not content['shots']
+                or content['shots'][motion[0]].get('asset_slot') != settings.get('poster_scene')
+                or str(motion[0]) in shot_video_sources
+                or str(motion[0]) in settings.get('shot_repair_sources', {})
+                or any(change['index'] == motion[0] and change.keys() - {'index','narration'} for change in shot_changes)):
+            raise ValueError('invalid_wearing_motion_shot')
+        changed_visual.update(motion)
     for change in shot_changes:
         index=change.get('index')
         if type(index) is not int or index in seen or not 0<=index<len(content['shots']):raise ValueError('invalid_shot_index')
@@ -36,7 +48,7 @@ def edit_handler(repository,job,services_factory):
             reverted_sources.add(index)
         for key,value in change.items():
             if key in {'index','video_source_id','start_seconds'}:continue
-            if not isinstance(value,str) or not value.strip():raise ValueError('invalid_shot_value')
+            if key not in KEYFRAME_FIELDS and (not isinstance(value,str) or not value.strip()):raise ValueError('invalid_shot_value')
             if key=='repair_asset_id':
                 changed_visual.add(index)
                 continue
@@ -45,7 +57,7 @@ def edit_handler(repository,job,services_factory):
             content['shots'][index][key]=value
             if key=='narration':changed_narration=True
             else:changed_visual.add(index)
-    if changed_narration:content['narration']=''.join(shot['narration'] for shot in content['shots'])
+    if changed_narration:content['narration']=''.join(shot.get('narration','') for shot in content['shots'])
     if settings.get('asset_id') and (changed_visual or changed_narration or reverted_sources):
         raise ValueError('shot_edit_conflicts_with_full_video_replacement')
     for field in ('title','body','poster_title','narration'):
@@ -116,10 +128,14 @@ def edit_handler(repository,job,services_factory):
                 raise ValueError('reusable_step_missing')
             return row.data['result']
         images={slot:prior('image/'+slot) for slot in ('white','scene_1','scene_2')}
+        if campaign_context:
+            campaign_context['wearing_campaign'] = bool(images.get(settings.get('poster_scene'), {}).get('worn'))
         poster=any(key in draft for key in ('poster_title','poster_points','poster_layout'))
         repair_sources={}
         if poster or changed_visual:
-            slots={content['shots'][index].get('asset_slot',settings.get('poster_scene','scene_1')) for index in changed_visual if index not in uploaded}
+            slots={content['shots'][index].get('asset_slot',settings.get('poster_scene','scene_1'))
+                   for index in changed_visual if index not in uploaded
+                   and not content['shots'][index].get('first_frame_asset_id')}
             if poster:slots.add(settings.get('poster_scene','white'))
             for asset_id in base['assets']:
                 asset=session.get(Record,asset_id)
@@ -135,7 +151,10 @@ def edit_handler(repository,job,services_factory):
                 repair_sources[slot]=asset.id
         if poster:
             image_slot=settings.get('poster_scene','white')
-            result=pipeline.step(job['id'],platform+'/poster','poster_render',{'copy':content,'images':images,'platform':platform,'layout':settings.get('poster_layout','classic'),'image_slot':image_slot})
+            if campaign_context and 'poster_layout' in draft:
+                settings['poster_style'] = 'selected_layout'
+            poster_context = campaign_context if settings.get('poster_style') != 'selected_layout' else {}
+            result=pipeline.step(job['id'],platform+'/poster','poster_render',{'copy':content,'images':images,'platform':platform,'layout':settings.get('poster_layout','classic'),'image_slot':image_slot,**poster_context})
             if image_slot in repair_sources:
                 result={**result,'repair_source_ids':[repair_sources[image_slot]]}
             branches[platform]['poster']={'state':'awaiting_review','result':result}
@@ -158,18 +177,52 @@ def edit_handler(repository,job,services_factory):
                 key=static_key if static and static.workspace==job['workspace'] and static.data.get('state')=='succeeded' else f'{platform}/dynamic/{index}'
                 if index in changed_visual:
                     shot={'asset_slot':settings.get('poster_scene','scene_1'),**content['shots'][index]}
-                    clips.append(pipeline.step(job['id'],key,'static_clip' if key==static_key else 'dynamic',{'shot':shot,'images':images,'platform':platform}))
+                    frame_input={}
+                    if shot.get('first_frame_asset_id'):
+                        if key == static_key or index in motion:
+                            raise ValueError('keyframe_video_source_conflict')
+                        try:
+                            frame_input={'keyframes':keyframe_assets(session,base,job['workspace'],
+                                         payload['work_id'],shot,services.private_root)}
+                        except HTTPException as error:
+                            raise ValueError(error.detail['code'].lower()) from None
+                        consent = session.get(Record, payload.get('consent_id') or '')
+                        if (not consent or consent.workspace != job['workspace']
+                                or consent.kind != 'processing_consent'
+                                or consent.data.get('keyframe_bindings',{}).get(str(index)) !=
+                                   [frame['sha256'] for frame in frame_input['keyframes']]):
+                            raise ValueError('keyframe_authorization_changed')
+                    if index in motion:
+                        slot = shot['asset_slot']
+                        if not images[slot].get('worn') or slot in repair_sources or key == static_key:
+                            raise ValueError('wearing_first_frame_required')
+                        work = session.get(Record, payload['work_id'])
+                        request = session.get(Record, work.data['creation_request_id']) if work and work.workspace == job['workspace'] else None
+                        if (not request or request.workspace != job['workspace'] or request.kind != 'creation_request'
+                                or request.data.get('deleting') or not request.data.get('wear_source_id')):
+                            raise ValueError('wearing_first_frame_required')
+                        from app.photo_campaign import resolve_photos
+                        resolve_photos(session, job['workspace'], request.data)
+                    clips.append(pipeline.step(job['id'],key,'static_clip' if key==static_key else 'dynamic',{'shot':shot,'images':images,'platform':platform,**campaign_context,**frame_input}))
                     shot_sources.pop(str(index),None)
-                    if shot['asset_slot'] in repair_sources:
+                    if not frame_input and shot['asset_slot'] in repair_sources:
                         shot_sources[str(index)]=repair_sources[shot['asset_slot']]
                     step_sources[key]=job['id']
                 else:clips.append(prior(key))
             voice=prior(platform+'/voice')
             if changed_narration or 'voice' in draft or 'narration' in draft:
                 voice=pipeline.step(job['id'],platform+'/voice','tts',{'text':content['narration'],'voice':settings.get('voice','Cherry')})
+                if campaign_context:
+                    settings['soundtrack'] = 'narration'
             settings['shot_repair_sources']=shot_sources
             settings['shot_video_sources']=shot_video_sources
             video_repair_sources={source_id for index,source_id in shot_sources.items() if index not in shot_video_sources}
+            for shot in content['shots']:
+                for field in KEYFRAME_FIELDS:
+                    if asset_id := shot.get(field):
+                        asset = session.get(Record, asset_id)
+                        if asset and asset.data.get('repair_task_id'):
+                            video_repair_sources.add(asset_id)
             if replacement:
                 clip, source_ids=replacement
                 clips=[clip]
@@ -183,7 +236,7 @@ def edit_handler(repository,job,services_factory):
                     raise ValueError('authorized_music_asset_required')
                 music={'path':str(Path(services.private_root)/music_asset.data['object_key']),'sha256':music_asset.data['sha256']}
             duration=sum(float(shot['duration']) for shot in content['shots'])
-            result=pipeline.step(job['id'],platform+'/video','video_render',{'clips':clips,'voice':voice,'duration':duration,'copy':content,'music':music,'subtitle_style':settings.get('subtitle_style','default')})
+            result=pipeline.step(job['id'],platform+'/video','video_render',{'clips':clips,'voice':voice,'duration':duration,'copy':content,'music':music,'subtitle_style':settings.get('subtitle_style','default'),**campaign_context})
             settings.pop('voice_alignment',None)
             if alignment:=result.get('voice_alignment'):
                 settings['voice_alignment']=alignment

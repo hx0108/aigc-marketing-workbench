@@ -9,7 +9,7 @@ from app.db import Record
 from app.execution import Task
 from .assets import download
 from .bridge import RenderBridge
-from .media import place_product,probe,static_clip
+from .media import place_product,probe,static_clip,save_image
 from .results import text_result, image_bytes, audio_url, await_video
 from .http_providers import MiniMaxHailuoFast, MiniMaxVideo
 
@@ -112,7 +112,8 @@ def configured_services(job):
         with store_sessions() as session:
             task=session.get(Task,job['id'])
             return not task or task.state!='running' or task.fencing_token!=job['fencing_token']
-    registry=handlers(config['providers'],config['private_root'],config['font'],config['allowed_hosts'],config['source_factory'](job),config['save_remote'],canceled,config['publish_image'])
+    source = {} if job['kind']=='repair_asset' else config['source_factory'](job)
+    registry=handlers(config['providers'],config['private_root'],config['font'],config['allowed_hosts'],source,config['save_remote'],canceled,config['publish_image'])
     services=AuthorizedServices(store_sessions,config['budget_id'],config['policy_factory'](job),registry,config['bounds'],job['id'],job['workspace'],job['fencing_token'])
     services.persist_result=lambda current,result:persist_result(store_sessions,current,result,config['private_root'])
     services.private_root=config['private_root']
@@ -122,15 +123,12 @@ def configured_services(job):
 
 def local_edit_services(job):
     """Render-only execution; no provider, network handler, credential or ledger access."""
-    import os
+    from .bridge import local_render_font
     from app.db import Session
     from app.sources import ROOT
     from .media import static_clip, source_clip_handler
     payload=job['payload']
-    candidates=[os.environ.get('AIGC_RENDER_FONT',''), '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc', 'C:/Windows/Fonts/msyh.ttc']
-    font=next((path for path in candidates if path and Path(path).is_file()),None)
-    if not font:raise ValueError('local_render_font_required')
-    renderer=RenderBridge(ROOT,font)
+    renderer=RenderBridge(ROOT,local_render_font())
     registry={'video_render':renderer.video,'poster_render':renderer.poster,
               'source_clip':lambda item,intent:source_clip_handler(item,intent,renderer),
               'static_clip':lambda item,intent:static_clip(renderer.input_path(item['images'][item['shot'].get('asset_slot','scene_1')]),renderer.path(intent,'.mp4'),item['shot']['duration'])}
@@ -228,7 +226,18 @@ def handlers(providers, root, font, allowed_hosts, source, save_remote, canceled
             validate_hailuo_shots(result, payload)
         return result
     def image(payload, intent):
-        product, mask = renderer.input_path(source['product']), renderer.input_path(source['mask'])
+        if payload['slot'] == 'repair':
+            provider = providers['image']
+            if provider.model != 'MiniMax-H3-Image':
+                raise ValueError('repair_model_not_configured')
+            prompt = ('Picture 1 is the original image. Picture 2 is a black and white mask. '
+                      'Edit only the white region and keep the framing and everything outside it fixed. '
+                      'Apply this change within the marked region: ' + payload['instruction'])
+            references = [publish_image(payload[key]) for key in ('candidate','mask')]
+            response = provider.submit(prompt, reference_image=references)
+            save_remote(intent, {'id':response['id'],'model':provider.model})
+            with Image.open(io.BytesIO(image_bytes(response))) as candidate:
+                return save_image(candidate.convert('RGB'), renderer.path(intent, '.png'))
         if payload['slot'] == 'white':
             background = renderer.input_path(source['white_background'])
         else:
@@ -237,17 +246,40 @@ def handlers(providers, root, font, allowed_hosts, source, save_remote, canceled
             from .creative_direction import resolved_plan, image_prompt
             plan=resolved_plan(payload.get('copy',{}).get(owner,{}),payload['request']['facts'],owner)
             prompt=image_prompt(plan)
-            save_remote(intent+'/creative',{'visual_plan':plan,'prompt':prompt})
-            response = providers['image'].submit(prompt)
+            reference_scene = providers['image'].model == 'MiniMax-H3-Image' and plan['category'] == 'headphones'
+            evidence = {'visual_plan':plan}
+            if reference_scene:
+                setting = 'an outdoor athletics track at dusk' if owner == 'douyin' else 'a sunlit riverside path'
+                prompt = (f'Create a new photorealistic side-profile close-up of an adult jogger at {setting}. '
+                          'The jogger wears the exact headphones or earpiece shown in Picture 1 in the '
+                          'anatomically correct position. Keep all visible contours, colors, proportions, '
+                          'materials and markings. Keep the ear and product in sharp focus. No added text.')
+                if payload['request'].get('scene_framing') == 'running_medium':
+                    prompt = (f'Picture 1 is the product reference. Create a new premium sports advertising '
+                              f'photograph at {setting}. Side-tracking medium shot of an adult runner mid-stride, '
+                              'framed from head to hips, both bent arms visible and pumping, shoulders rotating. '
+                              'The nearer ear wears exactly the pearl-white stem earbud from Picture 1 with a '
+                              'brushed silver circular face and single narrow orange stem accent, correct small '
+                              'size. Ear and earbud sharply visible, hair clear of ear, realistic skin. '
+                              'The runner is visibly running, not standing. Vertical composition. No text.')
+                evidence['reference_sha256'] = source['product']['sha256']
+            save_remote(intent+'/creative',{**evidence,'prompt':prompt})
+            kwargs = {'reference_image':publish_image(source['product'])} if reference_scene else {}
+            response = providers['image'].submit(prompt, **kwargs)
             data = image_bytes(response)
             with Image.open(io.BytesIO(data)) as generated:
                 if generated.format not in ('PNG', 'JPEG', 'WEBP') or max(generated.size) > 2048:
                     raise ValueError('invalid_minimax_image_dimensions_or_format')
+                extension = {'PNG':'.png','JPEG':'.jpg','WEBP':'.webp'}[generated.format]
                 generated.verify()
-            background = renderer.path(intent + '/background', '.image')
+            background = renderer.path(intent, extension) if reference_scene else renderer.path(intent + '/background', '.image')
             with background.open('xb') as output:
                 output.write(data)
             save_remote(intent, {'id': response.get('id'), 'model': providers['image'].model})
+            if reference_scene:
+                return {'path':str(background),'sha256':hashlib.sha256(data).hexdigest(),'worn':True,
+                        'scene_model':providers['image'].model,'reference_sha256':source['product']['sha256']}
+        product, mask = renderer.input_path(source['product']), renderer.input_path(source['mask'])
         return place_product(product,mask,background,renderer.path(intent,'.png'))
     def dynamic(payload,intent):
         shot=payload['shot']
@@ -259,8 +291,30 @@ def handlers(providers, root, font, allowed_hosts, source, save_remote, canceled
         platform=payload.get('platform','douyin')
         plan=resolved_plan({'visual_plan':payload['visual_plan']} if payload.get('visual_plan') else {},payload.get('facts',[]),platform)
         prompt=video_prompt(plan)
-        save_remote(intent+'/creative',{'visual_plan':plan,'prompt':prompt,'input_sha256':asset['sha256']})
-        response=providers['video'].submit([{'type':'text','text':prompt},{'type':'image_url','image_url':{'url':publish_image(asset)}}],duration=shot['duration'])
+        if asset.get('worn') and (payload.get('campaign_platform') == platform or asset.get('scene_model') == 'MiniMax-H3-Image'):
+            prompt = ('Animate the existing athlete in the supplied in-ear product photograph. '
+                      'Show continuous forward jogging for the whole shot, with rhythmic head and shoulder '
+                      'movement, natural breathing, and the background passing behind the runner. '
+                      'Use one steady side-tracking close-up without cuts. '
+                      'Maintain the identity, shape, logo, color, size and position of the photographed '
+                      'earpiece on the same ear throughout. Keep the original person, lighting and setting. '
+                      'Keep text and audio out of the shot.')
+        keyframes = payload.get('keyframes')
+        if keyframes and providers['video'].model != 'MiniMax-H3':
+            raise ValueError('keyframe_provider_unsupported')
+        if keyframes and (not 4 <= shot['duration'] <= 15 or shot['duration'] != int(shot['duration'])):
+            raise ValueError('keyframe_duration_unsupported')
+        frames = keyframes or [asset]
+        evidence = {'visual_plan':plan, 'prompt':prompt, 'input_sha256':frames[0]['sha256']}
+        if keyframes:
+            evidence['last_frame_sha256'] = frames[1]['sha256']
+            direction = str(shot.get('visual_description') or 'Use a steady, continuous camera movement.')[:1500]
+            prompt = ('Generate a continuous transition between the specified first and last images. '
+                      'Preserve the product’s appearance throughout. Keep text out of the shot. ' + direction)
+            evidence['prompt'] = prompt
+        save_remote(intent+'/creative',evidence)
+        inputs = [{'type':'image_url','image_url':{'url':publish_image(frame)}} for frame in frames]
+        response=providers['video'].submit([{'type':'text','text':prompt},*inputs],duration=shot['duration'])
         save_remote(intent,response)
         external_id=response.get('id')
         if not external_id:
@@ -268,6 +322,11 @@ def handlers(providers, root, font, allowed_hosts, source, save_remote, canceled
         url=await_video(providers['video'],external_id,lambda _,value:save_remote(intent,value),canceled)
         clip = fetch(url,intent,'video')
         if isinstance(providers['video'], MiniMaxVideo):
+            if keyframes:
+                metadata = probe(clip['path'])
+                video_stream = next(stream for stream in metadata['streams'] if stream['codec_type']=='video')
+                if float(video_stream.get('duration') or metadata['format']['duration']) > float(shot['duration']):
+                    raise ValueError('keyframe_clip_duration_would_trim_last_frame')
             return normalize_minimax_clip(clip, float(shot['duration']), renderer.path(intent + '/trimmed', '.mp4'))
         return clip
     def voice(payload,intent):
@@ -330,6 +389,12 @@ def persist_result(sessions, job, result, private_root):
                 if branch['state']=='awaiting_review':
                     outputs.append((kind,platform,branch['result']))
                     if kind=='video':
+                        poster = branches.get('poster', {})
+                        if (result.get('render_settings', {}).get(platform, {}).get('creative_mode') == 'photo_campaign'
+                            and poster.get('state') == 'awaiting_review'):
+                            # The campaign poster is composed for a 3:4 feed cover, including its own visible label.
+                            outputs.append(('cover', platform, poster['result']))
+                            continue
                         cover=root/(hashlib.sha256((base_revision_id+platform+'cover').encode()).hexdigest()+'.png')
                         if not cover.exists():
                             subprocess.run(['ffmpeg','-v','error','-nostdin','-n','-i',branch['result']['path'],'-vf','scale=1080:1440:force_original_aspect_ratio=decrease,pad=1080:1440:(ow-iw)/2:(oh-ih)/2','-frames:v','1',str(cover)],capture_output=True,check=True,timeout=30)

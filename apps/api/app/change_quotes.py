@@ -7,7 +7,8 @@ def calculate_quote(s, w, work):
     if draft.get('restore_revision_id'):
         return {'invalidated_nodes':['review','manifest'],'reused_nodes':['historical_media'],'affected_platforms':work.data['platforms'],'requires_authorization':False,'cost_upper_bound':0,'executable':True,'blockers':[],'expected_revision':work.revision}, None
     from .shot_edits import plan
-    shot_nodes,dynamic_durations=plan(s,work,draft,include_durations=True)
+    keyframe_bindings={}
+    shot_nodes,dynamic_durations=plan(s,work,draft,include_durations=True,keyframe_bindings=keyframe_bindings)
     nodes.update(shot_nodes)
     for key in draft:
         nodes.update({'title':['copy','manifest'],'body':['copy','manifest'],'narration':['tts','subtitles','video_compose'],'voice':['tts','subtitles','video_compose'],'music':['video_compose'],'subtitle_style':['video_compose'],'poster_title':['poster_render'],'poster_points':['poster_render'],'poster_layout':['poster_render'],'asset_id':['video_compose']}.get(key,[]))
@@ -29,6 +30,10 @@ def calculate_quote(s, w, work):
         blockers=readiness()
         if blockers:raise ValueError('PROVIDER_NOT_CONFIGURED')
         authorization=authorization_snapshot(w,work.data['creation_request_id'])
+        if 'keyframes' in nodes and authorization.get('providers',{}).get('video') != 'MiniMax-H3':
+            raise ValueError('KEYFRAME_PROVIDER_UNSUPPORTED')
+        if keyframe_bindings:
+            authorization={**authorization,'keyframe_bindings':keyframe_bindings}
         from decimal import Decimal
         amount=Decimal(str(authorization['bounds']['tts'])) if 'tts' in nodes else Decimal('0')
         from .pricing import dynamic_bound
@@ -36,7 +41,8 @@ def calculate_quote(s, w, work):
         quote = {'invalidated_nodes':sorted(nodes),'requires_authorization':True,'cost_upper_bound':str(amount),'executable':True,'blockers':[],'price_version':authorization['price_version'],'budget_id':authorization['budget_id'],'expected_revision':work.revision}
         return quote, authorization
     except (ImportError,ValueError,KeyError) as error:
-        blocker = {'invalid_minimax_video_duration':'INVALID_VIDEO_DURATION',
+        blocker = {'KEYFRAME_PROVIDER_UNSUPPORTED':'KEYFRAME_PROVIDER_UNSUPPORTED',
+                   'invalid_minimax_video_duration':'INVALID_VIDEO_DURATION',
                    'dynamic_cost_exceeds_configured_bound':'DYNAMIC_COST_EXCEEDS_CONFIGURED_BOUND'}.get(str(error),'PRICE_NOT_CONFIGURED')
         return {'invalidated_nodes':sorted(nodes),'requires_authorization':True,'cost_upper_bound':None,'executable':False,'blockers':[blocker]}, None
 

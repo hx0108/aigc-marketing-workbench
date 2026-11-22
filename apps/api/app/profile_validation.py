@@ -17,7 +17,8 @@ def validate_profile(session,workspace,profile):
     for source_id in profile.data.get('source_ids',[]):
         source=session.get(Record,source_id)
         if not source or source.workspace!=workspace or source.kind!='source' or source.data.get('sku_id')!=sku.id or source.data.get('deleting'):raise HTTPException(422,detail={'code':'SOURCE_SCOPE_INVALID'})
-        if source.data.get('type')=='image' and source.data.get('role')!='mask' and source.data.get('rights_confirmed'):
+        if (source.data.get('type')=='image' and source.data.get('role')!='mask'
+                and not source.data.get('is_subject_mask') and source.data.get('rights_confirmed')):
             path=(ROOT/source.data['object_key']).resolve()
             if path.is_relative_to(ROOT) and path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest()==source.data['sha256']:has_image=True
     if not has_image:missing.append('current_product_image')

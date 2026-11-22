@@ -13,6 +13,52 @@ from marketing_worker.factory import build_providers
 from marketing_worker.platform_style import STYLES, scene_owners
 
 
+def test_h3_generated_wearing_image_is_exact_video_first_frame(tmp_path, monkeypatch):
+    calls, evidence = [], {}
+    original = tmp_path / 'product.png'
+    Image.new('RGB', (60, 100), 'white').save(original)
+    generated = io.BytesIO()
+    Image.new('RGB', (1152, 2048), 'blue').save(generated, format='PNG')
+    image_bytes = generated.getvalue()
+
+    def transport(request):
+        body = json.loads(request.content) if request.content else {}
+        calls.append((request.url.path, body))
+        if request.url.path == '/v1/images/edits':
+            result = {'request_id':'generated-scene', 'data':[{'b64_json':base64.b64encode(image_bytes).decode()}]}
+        elif request.method == 'POST':
+            result = {'task_id':'123'}
+        else:
+            result = {'task':{'id':'123', 'model':'MiniMax-H3', 'status':'succeeded',
+                              'content':{'url':'https://assets.example/video.mp4'}}}
+        return httpx.Response(200, json=result)
+
+    def publish(asset):
+        return 'data:image/png;base64,' + base64.b64encode(Path(asset['path']).read_bytes()).decode()
+
+    config = {kind:{'base_url':'https://provider.example', 'model':model} for kind, model in
+              {'text':'deepseek-chat', 'image':'MiniMax-H3-Image', 'video':'MiniMax-H3', 'tts':'qwen-tts'}.items()}
+    source = {'product':{'path':str(original), 'sha256':hashlib.sha256(original.read_bytes()).hexdigest()}}
+    monkeypatch.setattr(business, 'normalize_minimax_clip', lambda clip, *args:clip)
+    with httpx.Client(transport=httpx.MockTransport(transport)) as client:
+        providers = build_providers(config, dict.fromkeys(['DEEPSEEK_API_KEY','MINIMAX_API_KEY','DASHSCOPE_API_KEY'], 'fixture'), client)
+        registry = business.handlers(providers, tmp_path, 'C:/Windows/Fonts/msyh.ttc', {'assets.example'}, source,
+                                     lambda key,value:evidence.update({key:value}), lambda:False, publish,
+                                     lambda *args:{'path':'fixture-video'})
+        request = {'platforms':['douyin'], 'facts':[{'id':'name','value':'无线耳机','validity':'active'}]}
+        image = registry['product_image']({'slot':'scene_1','request':request}, 'scene')
+        registry['dynamic']({'platform':'douyin','shot':{'asset_slot':'scene_1','duration':4},
+                             'images':{'scene_1':image}}, 'video')
+    assert Path(image['path']).read_bytes() == image_bytes
+    assert image['reference_sha256'] == source['product']['sha256']
+    image_payload = next(body for path,body in calls if path == '/v1/images/edits')
+    assert image_payload['images'][0]['image_url'] == publish(source['product'])
+    video_payload = next(body for path,body in calls if path == '/v2/video_generation')
+    assert video_payload['content'][1]['image_url']['url'] == publish(image)
+    assert 'continuous forward jogging' in video_payload['content'][0]['text']
+    assert evidence['video/creative']['input_sha256'] == hashlib.sha256(image_bytes).hexdigest()
+
+
 @pytest.mark.parametrize('platforms', [['douyin'], ['xiaohongshu'], ['douyin', 'xiaohongshu']])
 def test_actual_provider_payloads_carry_selected_platform_direction(tmp_path, monkeypatch, platforms):
     calls=[]

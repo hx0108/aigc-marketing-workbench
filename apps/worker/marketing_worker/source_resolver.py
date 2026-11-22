@@ -18,6 +18,12 @@ def resolve_sources(sessions,job,root,configured):
             if not creation or creation.workspace!=job['workspace']:raise ValueError('creation_not_found')
             request=creation.data
         sku_id=request['sku_id']
+        if request.get('creative_mode') == 'photo_campaign' and job.get('kind') in {'edit_run', 'copy_rewrite'}:
+            # An edit uses an existing shot or copy. Verify every original photo without
+            # requiring the optional image-generation mask from a different workflow.
+            from app.photo_campaign import resolve_photos
+            resolve_photos(session, job['workspace'], request)
+            return {}
         # Synthetic fixtures remain explicit; production source selection uses persisted roles.
         if sku_id in configured:
             if not request.get('synthetic_fixture') or sku_id!='synthetic-sku':

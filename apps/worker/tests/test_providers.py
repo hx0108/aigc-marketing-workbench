@@ -1,9 +1,61 @@
 import unittest
+import json
 import httpx
 from marketing_worker.http_providers import DeepSeek, MiniMaxHailuoFast, MiniMaxImage, MiniMaxVideo, QwenTTS, ExternalUnknown, ProviderRejected
 
 
 class AdapterTests(unittest.TestCase):
+    def test_h3_video_serializes_two_distinct_frame_roles(self):
+        def handle(request):
+            self.assertEqual(request.url.path, '/v2/video_generation')
+            payload = json.loads(request.content)
+            self.assertEqual(payload['duration'], 6)
+            self.assertEqual(payload['content'][1:], [
+                {'type':'image_url','role':'first_frame','image_url':{'url':'data:image/png;base64,YQ=='}},
+                {'type':'image_url','role':'last_frame','image_url':{'url':'data:image/png;base64,Yg=='}},
+            ])
+            return httpx.Response(200, json={'task_id':'12345'})
+        with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+            video = MiniMaxVideo('test', 'https://api.minimax.cn', 'MiniMax-H3', client)
+            result = video.submit([
+                {'type':'text','text':'Track the same earbud from both frames.'},
+                {'type':'image_url','image_url':{'url':'data:image/png;base64,YQ=='}},
+                {'type':'image_url','image_url':{'url':'data:image/png;base64,Yg=='}},
+            ], duration=6)
+        self.assertEqual(result, {'id':'12345','model':'MiniMax-H3'})
+
+    def test_h3_image_edits_product_reference(self):
+        from marketing_worker.http_providers import MiniMaxH3Image
+        from marketing_worker.results import image_bytes
+        reference = 'data:image/png;base64,YWJj'
+        def handle(request):
+            self.assertEqual(request.url.path, '/v1/images/edits')
+            body = json.loads(request.content)
+            self.assertEqual(body['images'], [{'image_url': reference}])
+            self.assertEqual(body['model'], 'MiniMax-H3-Image')
+            return httpx.Response(200, json={'request_id':'img-01','data':[{'b64_json':'YWJj'}]})
+        with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+            provider = MiniMaxH3Image('test', 'https://api.minimax.cn', 'MiniMax-H3-Image', client)
+            result = provider.submit('Wear the product in Picture 1', reference_image=reference)
+            self.assertEqual(image_bytes(result), b'abc')
+            self.assertEqual(result['id'], 'img-01')
+            with self.assertRaisesRegex(ValueError,'invalid_minimax_reference_image'):
+                provider.submit('Wear the product', reference_image='file:///private.png')
+
+    def test_h3_repair_sends_candidate_and_mask_in_order(self):
+        from marketing_worker.http_providers import MiniMaxH3Image
+        refs = ['data:image/png;base64,YWJj','data:image/png;base64,ZGVm']
+
+        def handle(request):
+            body = json.loads(request.content)
+            self.assertEqual(request.url.path, '/v1/images/edits')
+            self.assertEqual(body['images'], [{'image_url':ref} for ref in refs])
+            return httpx.Response(200,json={'request_id':'repair-1','data':[{'b64_json':'YWJj'}]})
+
+        with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+            provider = MiniMaxH3Image('test','https://api.minimax.cn','MiniMax-H3-Image',client)
+            self.assertEqual(provider.submit('Repair Picture 1 inside Picture 2',reference_image=refs)['id'],'repair-1')
+
     def test_hailuo_fast_private_frame_and_fixed_price(self):
         import base64
         from decimal import Decimal

@@ -8,6 +8,35 @@ from app.db import Record
 from test_core import client
 
 
+def test_release_scene_has_visible_pixels_and_requires_exact_version_review(tmp_path, monkeypatch):
+    import pytest
+    from PIL import ImageChops
+    from marketing_worker.release_metadata import labelled_derivative
+    source = tmp_path/'scene.png'
+    Image.new('RGB', (540,720), 'teal').save(source)
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    monkeypatch.setenv('AIGC_RELEASE_CONTENT_PRODUCER','fixture')
+    monkeypatch.setenv('AIGC_RELEASE_CONTENT_PROPAGATOR','fixture')
+    monkeypatch.setattr(release,'ROOT',tmp_path)
+    tagged = labelled_derivative(source,digest,['workspace','work','image','scene_1'],tmp_path)
+    with Image.open(tagged) as pic, Image.open(source) as original:
+        area = ImageChops.difference(pic.convert('RGB'),original).getbbox()
+        assert area and area[2] < 120 and area[3] < 80
+        assert len(pic.convert('RGB').crop(area).getcolors(10000)) > 3
+    sha = hashlib.sha256(tagged.read_bytes()).hexdigest()
+    asset = SimpleNamespace(revision=1,data={'media_kind':'product_image','slot':'scene_1','review':'approved',
+                                             'release_object_key':tagged.name,'release_sha256':sha})
+    rules = {'version':'fixture','implicit_label_version':release.IMPLICIT_LABEL_VERSION}
+    with pytest.raises(ValueError,match='LABEL_VERIFICATION_REQUIRED'):
+        release.require_label_verification(asset,rules)
+    asset.data['label_verification']=release.verify_label(asset,rules,1,sha,'fixture','test only')
+    release.require_label_verification(asset,rules)
+    asset.revision+=1
+    with pytest.raises(ValueError,match='LABEL_VERIFICATION_REQUIRED'):
+        release.require_label_verification(asset,rules)
+    assert hashlib.sha256(source.read_bytes()).hexdigest()==digest
+
+
 def implicit_fields():
     return {'Label':'1','ContentProducer':'fixture','ProduceID':'fixture-1','ReservedCode1':'',
             'ContentPropagator':'fixture','PropagateID':'fixture-1','ReservedCode2':''}

@@ -20,7 +20,7 @@ def verify_consent(session, job, settings):
         raise ValueError('processing_consent_required')
     expected={key:settings.get(key) for key in ('price_version','budget_id','consent_version','bounds')}
     expected['providers']={key:value['model'] for key,value in settings['providers'].items()}
-    adapters=provider_adapters(expected['providers'].get('video'))
+    adapters=provider_adapters(expected['providers'].get('video'), expected['providers'].get('image'))
     expected['provider_parameters']={key:{**adapters[key].defaults,**value.get('parameters',{})} for key,value in settings['providers'].items()}
     if any(consent.data.get(key)!=value for key,value in expected.items()):
         raise ValueError('authorization_scope_changed')
@@ -30,7 +30,7 @@ def verify_consent(session, job, settings):
         if not work or work.workspace!=job['workspace'] or work.kind!='work' or work.data.get('deleting'):
             raise ValueError('consent_scope_mismatch')
         scope['request_id']=work.data.get('creation_request_id')
-    for key in ('request_id','work_id','source_ids','platforms','duration_seconds','base_result_id','base_draft_revision','draft','platform','instruction','quote_id'):
+    for key in ('request_id','work_id','source_ids','platforms','duration_seconds','base_result_id','base_draft_revision','draft','platform','instruction','quote_id','candidate_asset_id','mask_source_id','repair_input_sha256'):
         if key in consent.data and consent.data[key]!=scope.get(key):
             raise ValueError('consent_scope_mismatch')
     profile_id=payload.get('profile_id') or request.get('profile_id')

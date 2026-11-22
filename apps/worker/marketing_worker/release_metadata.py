@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
 
-from PIL import Image, PngImagePlugin
+from PIL import Image, ImageDraw, ImageFont, PngImagePlugin
 
 
 def labelled_derivative(source, digest, artifact, root):
@@ -23,7 +23,11 @@ def labelled_derivative(source, digest, artifact, root):
     ):
         raise ValueError('release_identity_invalid')
 
-    identifier = hashlib.sha256(json.dumps([artifact, digest, producer]).encode()).hexdigest()
+    scene = len(artifact) == 4 and artifact[2] in {'image', 'product_image'} and artifact[3] in {'scene_1','scene_2'}
+    identity_inputs = [artifact, digest, producer]
+    if scene:
+        identity_inputs.append('visible-scene-label-v1')
+    identifier = hashlib.sha256(json.dumps(identity_inputs).encode()).hexdigest()
     metadata = {
         'Label': '1', 'ContentProducer': producer, 'ProduceID': identifier,
         'ReservedCode1': '', 'ContentPropagator': propagator, 'PropagateID': identifier,
@@ -41,6 +45,17 @@ def labelled_derivative(source, digest, artifact, root):
             with Image.open(source) as image:
                 if image.format != 'PNG':
                     raise ValueError('release_label_format_unsupported')
+                if scene:
+                    from .bridge import local_render_font
+                    image = image.convert('RGBA')
+                    font = ImageFont.truetype(local_render_font(), max(12, min(image.size) // 36))
+                    draw = ImageDraw.Draw(image)
+                    label = 'AI生成'
+                    margin = max(3, font.size // 3)
+                    x, y = margin * 2, margin * 2
+                    box = draw.textbbox((x,y), label, font=font, anchor='lt')
+                    draw.rounded_rectangle((x-margin,y-margin,box[2]+margin,box[3]+margin), radius=margin, fill='#242424')
+                    draw.text((x,y), label, font=font, anchor='lt', fill='white')
                 image.save(staged, pnginfo=tags)
         elif suffix == '.mp4':
             subprocess.run([

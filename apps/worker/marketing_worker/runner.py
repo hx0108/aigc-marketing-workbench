@@ -29,10 +29,13 @@ def run_once(repository, owner, services_factory=None):
     try:
         if job['kind']=='repair_asset':
             from .repair import repair_handler
-            result=repair_handler(repository,job)
+            result=repair_handler(repository,job,services_factory)
         elif job['kind'] in ('edit_run','copy_rewrite') and services_factory:
             from .edits import edit_handler,rewrite_handler
             result=({'edit_run':edit_handler,'copy_rewrite':rewrite_handler}[job['kind']])(repository,job,services_factory)
+        elif job['kind'] == 'creation_run' and job['payload'].get('request', {}).get('creative_mode') == 'photo_campaign':
+            from .photo_campaign import create_campaign
+            result = create_campaign(repository, job)
         elif job['kind'] == 'creation_run' and services_factory:
             from .bridge import creation_handler
             result = creation_handler(repository, job, services_factory)

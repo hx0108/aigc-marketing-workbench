@@ -19,6 +19,17 @@ test('individual upload validation handles unsupported, empty and oversized file
 });
 import {previewUrl,resultContent,narrationPatch,workbenchLocation,taskCharges,hasActiveTasks,listPagePath,assetsForExport,exportError,formatYuan} from './work-contract.mjs';
 
+test('keyframes are previewed from the active draft and survive a rendered result', () => {
+ const approved = {first_frame_asset_id:'start',last_frame_asset_id:'finish'};
+ const rendered = {douyin:{shots:[{duration:6,...approved}]},xiaohongshu:{shots:[{duration:6}]}};
+ const replacement = {platform:'douyin',shots:[{index:0,first_frame_asset_id:'new-start',last_frame_asset_id:'new-finish'}]};
+ assert.equal(resultContent(rendered).shots[0][0].first_frame_asset_id,'start');
+ assert.equal(resultContent(rendered,replacement).shots[0][0].first_frame_asset_id,'new-start');
+ assert.equal(resultContent(rendered,replacement).shots[1][0].first_frame_asset_id,undefined);
+ const cleared = {platform:'douyin',shots:[{index:0,first_frame_asset_id:null,last_frame_asset_id:null}]};
+ assert.equal(resultContent(rendered,cleared).shots[0][0].last_frame_asset_id,null);
+});
+
 test('quote formats cents without rounding away finer precision',()=>{
  assert.equal(formatYuan('10.00000000'),'¥10.00');
  assert.equal(formatYuan('0.00000001'),'¥0.00000001');
@@ -102,4 +113,18 @@ test('draft affects selected platform only and leaves rendered content immutable
  assert.equal(resultContent(copy,{}, {douyin:{poster_scene:'scene_2'}}).shots[0][0].asset_slot,'scene_2');
  assert.equal(rendered.title[0],'original');assert.equal(draft.title[0],'edited');assert.equal(draft.title[1],'other');
  assert.equal(rendered.posterLine[0],'A · B');assert.deepEqual(rendered.scripts[0],['rendered']);assert.equal(copy.douyin.title,'original');
+});
+
+test('wear motion request stays scoped to first photo shot and selected platform',()=>{
+ const shot={asset_slot:'scene_1',duration:4};
+ const copies={douyin:{shots:[shot,shot]},xiaohongshu:{shots:[shot]}};
+ const config={creative_mode:'photo_campaign',poster_scene:'scene_1',wearing_campaign:true};
+ const settings={douyin:config,xiaohongshu:{...config,wearing_campaign:false}};
+ const {shots}=resultContent(copies,{platform:'douyin',shot_motion_indices:[0]},settings);
+ assert.equal(shots[0][0].motionEligible,true);
+ assert.equal(shots[0][0].motionRequested,true);
+ assert.equal(shots[0][1].motionEligible,undefined);
+ assert.equal(shots[1][0].motionEligible,undefined);
+ assert.equal(shots[1][0].motionRequested,undefined);
+ assert.equal(resultContent(copies,{platform:'douyin',shot_motion_indices:[]},settings).shots[0][0].motionRequested,undefined);
 });

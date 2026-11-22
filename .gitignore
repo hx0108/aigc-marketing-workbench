@@ -29,3 +29,4 @@ designs/**/reference/
 designs/**/screenshots/
 designs/**/_d_meta.json
 !scripts/verify_postgres_budget.py
+!scripts/verify_photo_campaign.py

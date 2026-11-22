@@ -116,6 +116,11 @@ export function resultContent(copy = {}, draft = {}, renderSettings = {}) {
       }
       baseShots[index]=shot;
     }
+    const first = baseShots[0];
+    const config = renderSettings[platform];
+    if (first && config?.creative_mode === 'photo_campaign' && first.asset_slot === config.poster_scene && !first.video_source_id &&
+        (config.wearing_campaign ?? (copy[platform]?.shots?.[0]?.visual_description === '运动佩戴近景'))) first.motionEligible = true;
+    if (first && draft.platform === platform && draft.shot_motion_indices?.includes(0)) first.motionRequested = true;
     result.shots[i]=baseShots;
     result.title[i]=c.title || ''; result.body[i]=c.body || '';
     result.scripts[i]=baseShots.length?baseShots.map(s=>s.narration):(Array.isArray(c.narration)?c.narration:[c.narration || '']);
@@ -135,6 +140,13 @@ export function narrationPatch(previous,next,platform){
 
 export function creationQuoteError(error){
  const messages={PROFILE_INCOMPLETE:'商品资料未完整，请返回商品档案补充并确认。',PROFILE_NOT_CONFIRMED:'请先确认商品档案。',SOURCE_SCOPE_INVALID:'商品资料来源已失效，请重新选择资料。',FACT_CONFLICT:'商品事实存在冲突，请返回档案核对。',FACT_CONFLICT_UNRESOLVED:'商品事实冲突尚未处理，请先核对。',FACT_REQUIRED:'请先填写商品事实。',FACT_SOURCE_REQUIRED:'请先补充商品事实来源。'};
+ Object.assign(messages,{
+  PHOTO_DURATION_INVALID:'照片广告支持 6 到 30 秒。',
+  PHOTO_HEADLINE_INVALID:'海报标题限 32 字，数值卖点须与已确认的商品事实一致。',
+  PRODUCT_PHOTO_REQUIRED:'请在商品档案中确认至少一张有使用权的商品照片。',
+  WEAR_PHOTO_REQUIRED:'请选择单只入耳耳机的外侧照片，或使用商品展示镜头。',
+  PHOTO_SOURCE_CHANGED:'商品照片或使用权已变化，请重新确认档案并生成。',
+ });
  if(messages[error?.detail?.code])return messages[error.detail.code];
  if(error?.status===401)return '登录已失效，请重新登录。';
  if(error?.status===422)return '创作参数不完整或格式不正确，请检查后重试。';
