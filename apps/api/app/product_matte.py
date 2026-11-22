@@ -49,6 +49,9 @@ def _segment_subject(image):
     model = Path(__file__).with_name('models') / 'u2netp.onnx'
     options = ort.SessionOptions()
     options.intra_op_num_threads = 2
+    options.enable_cpu_mem_arena = False
+    options.enable_mem_pattern = False
+    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
     net = ort.InferenceSession(str(model), options, providers=['CPUExecutionProvider'])
     pixels = np.asarray(image.convert('RGB').resize((320, 320), Image.Resampling.BILINEAR), dtype=np.float32)
     pixels /= max(float(pixels.max()), 1.)
